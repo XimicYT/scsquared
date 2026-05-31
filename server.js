@@ -71,35 +71,38 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// 2. LOGIN ENDPOINT
+// LOGIN ENDPOINT (UPDATED)
 app.post('/api/auth/login', async (req, res) => {
-    const { chat_id, password } = req.body; // Login via the 6-digit phone-style ID
-    if (!chat_id || !password) {
-        return res.status(400).json({ error: 'Chat ID and password are required.' });
+    // We now look for a generic "login_identifier"
+    const { login_identifier, password } = req.body; 
+
+    if (!login_identifier || !password) {
+        return res.status(400).json({ error: 'Please enter your tag or display name, and password.' });
     }
 
     try {
+        // Query Supabase using the .or() filter to check both columns simultaneously
         const { data: user, error } = await supabase
             .from('users')
             .select('*')
-            .eq('chat_id', chat_id)
+            .or(`chat_id.eq.${login_identifier},username.eq.${login_identifier}`)
             .single();
 
         if (error || !user) {
-            return res.status(401).json({ error: 'Invalid Chat ID or password.' });
+            throw new Error("Nah, that's not the right login.");
         }
 
-        const isMatch = await bcrypt.compare(password, user.password_hash);
-        if (!isMatch) {
-            return res.status(401).json({ error: 'Invalid Chat ID or password.' });
+        const passwordMatch = await bcrypt.compare(password, user.password_hash);
+        if (!passwordMatch) {
+            throw new Error("Nah, that's not the right login.");
         }
 
-        res.status(200).json({
-            message: 'Login successful',
-            user: { id: user.id, username: user.username, chat_id: user.chat_id }
+        res.status(200).json({ 
+            message: 'Login successful', 
+            user: { id: user.id, username: user.username, chat_id: user.chat_id, first_name: user.first_name } 
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(401).json({ error: err.message });
     }
 });
 
