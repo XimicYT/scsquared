@@ -25,7 +25,7 @@ async function generateUniqueChatId() {
             .select('chat_id')
             .eq('chat_id', randomId)
             .single();
-        
+
         if (!data) return randomId; // ID is unique and available
         attempts++;
     }
@@ -35,8 +35,8 @@ async function generateUniqueChatId() {
 // 1. REGISTER ENDPOINT (UPDATED)
 app.post('/api/auth/register', async (req, res) => {
     // We now accept first_name and email alongside the others
-    const { first_name, username, email, password } = req.body; 
-    
+    const { first_name, username, email, password } = req.body;
+
     if (!username || !password || !first_name || !email) {
         return res.status(400).json({ error: 'All fields are required.' });
     }
@@ -48,12 +48,12 @@ app.post('/api/auth/register', async (req, res) => {
         // Insert the new fields into Supabase
         const { data, error } = await supabase
             .from('users')
-            .insert([{ 
-                first_name: first_name, 
+            .insert([{
+                first_name: first_name,
                 username: username, // This is the Display Name
                 email: email,
-                password_hash: passwordHash, 
-                chat_id: chatId 
+                password_hash: passwordHash,
+                chat_id: chatId
             }])
             .select('id, username, chat_id, first_name')
             .single();
@@ -71,41 +71,40 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// LOGIN ENDPOINT (UPDATED)
+// LOGIN ENDPOINT (UPDATED PHRASING)
 app.post('/api/auth/login', async (req, res) => {
-    // We now look for a generic "login_identifier"
-    const { login_identifier, password } = req.body; 
+    const { login_identifier, password } = req.body;
 
     if (!login_identifier || !password) {
         return res.status(400).json({ error: 'Please enter your tag or display name, and password.' });
     }
 
     try {
-        // Query Supabase using the .or() filter to check both columns simultaneously
         const { data: user, error } = await supabase
             .from('users')
             .select('*')
             .or(`chat_id.eq.${login_identifier},username.eq.${login_identifier}`)
             .single();
 
+        // Replaced "Nah" with "Nope"
         if (error || !user) {
-            throw new Error("Nah, that's not the right login.");
+            throw new Error("Nope, that's not the right login.");
         }
 
         const passwordMatch = await bcrypt.compare(password, user.password_hash);
+        // Replaced "Nah" with "Nope"
         if (!passwordMatch) {
-            throw new Error("Nah, that's not the right login.");
+            throw new Error("Nope, that's not the right login.");
         }
 
-        res.status(200).json({ 
-            message: 'Login successful', 
-            user: { id: user.id, username: user.username, chat_id: user.chat_id, first_name: user.first_name } 
+        res.status(200).json({
+            message: 'Login successful',
+            user: { id: user.id, username: user.username, chat_id: user.chat_id, first_name: user.first_name }
         });
     } catch (err) {
         res.status(401).json({ error: err.message });
     }
 });
-
 app.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
