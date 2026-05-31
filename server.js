@@ -32,24 +32,39 @@ async function generateUniqueChatId() {
     throw new Error('Failed to generate a unique Chat ID');
 }
 
-// 1. REGISTER ENDPOINT
+// 1. REGISTER ENDPOINT (UPDATED)
 app.post('/api/auth/register', async (req, res) => {
-    const { username, password } = req.body;
-    if (!username || !password) {
-        return res.status(400).json({ error: 'Username and password are required.' });
+    // We now accept first_name and email alongside the others
+    const { first_name, username, email, password } = req.body; 
+    
+    if (!username || !password || !first_name || !email) {
+        return res.status(400).json({ error: 'All fields are required.' });
     }
 
     try {
         const passwordHash = await bcrypt.hash(password, 10);
         const chatId = await generateUniqueChatId();
 
+        // Insert the new fields into Supabase
         const { data, error } = await supabase
             .from('users')
-            .insert([{ username, password_hash: passwordHash, chat_id: chatId }])
-            .select('id, username, chat_id')
+            .insert([{ 
+                first_name: first_name, 
+                username: username, // This is the Display Name
+                email: email,
+                password_hash: passwordHash, 
+                chat_id: chatId 
+            }])
+            .select('id, username, chat_id, first_name')
             .single();
 
-        if (error) throw error;
+        if (error) {
+            // Handle duplicate email or username errors cleanly
+            if (error.code === '23505') {
+                throw new Error("That email or display name is already taken.");
+            }
+            throw error;
+        }
         res.status(201).json({ message: 'User registered successfully', user: data });
     } catch (err) {
         res.status(500).json({ error: err.message });
