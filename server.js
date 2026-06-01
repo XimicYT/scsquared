@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const jwt = require('jsonwebtoken'); 
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
@@ -18,7 +18,7 @@ app.use(cors({
         // By passing 'true' back, we dynamically allow whatever origin made the request.
         // NOTE: Change this back to an array of specific URLs before final production!
         callback(null, true);
-    },
+    }, 
     credentials: true // Crucial to allow cross-origin HttpOnly cookies
 }));
 
@@ -73,7 +73,7 @@ async function generateUniqueChatId() {
             .eq('chat_id', randomId)
             .single();
 
-        if (!data) return randomId;
+        if (!data) return randomId; 
         attempts++;
     }
     throw new Error('Failed to generate a unique Chat ID');
@@ -105,21 +105,9 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'Please present a valid email address.' });
     }
 
-    // 🌟 FIX 3: Robust Password Hardening
-    if (password.length < 8) {
-        return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
-    }
-    if (!/[A-Z]/.test(password)) {
-        return res.status(400).json({ error: 'Password must contain at least one uppercase letter.' });
-    }
-    if (!/[a-z]/.test(password)) {
-        return res.status(400).json({ error: 'Password must contain at least one lowercase letter.' });
-    }
-    if (!/[0-9]/.test(password)) {
-        return res.status(400).json({ error: 'Password must contain at least one number.' });
-    }
-    if (!/[^a-zA-Z0-9]/.test(password)) {
-        return res.status(400).json({ error: 'Password must contain at least one special character.' });
+    // 🌟 FIX 3: Balanced Password Rule for Casual Use
+    if (password.length < 5) {
+        return res.status(400).json({ error: 'Password must be at least 5 characters long.' });
     }
 
     try {
@@ -130,7 +118,7 @@ app.post('/api/auth/register', async (req, res) => {
             .from('users')
             .insert([{
                 first_name: first_name,
-                username: username,
+                username: username, 
                 email: email,
                 password_hash: passwordHash,
                 chat_id: chatId
@@ -160,9 +148,9 @@ app.post('/api/auth/register', async (req, res) => {
             maxAge: 24 * 60 * 60 * 1000 // 24 Hours
         });
 
-        res.status(201).json({
-            message: 'User registered successfully',
-            user: data
+        res.status(201).json({ 
+            message: 'User registered successfully', 
+            user: data 
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -213,10 +201,10 @@ app.post('/api/auth/login', async (req, res) => {
         // Token is cleanly absent from the response body payload!
         res.status(200).json({
             message: 'Login successful',
-            user: {
-                id: user.id,
-                username: user.username,
-                chat_id: user.chat_id,
+            user: { 
+                id: user.id, 
+                username: user.username, 
+                chat_id: user.chat_id, 
                 first_name: user.first_name
             }
         });
