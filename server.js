@@ -176,7 +176,13 @@ app.post('/api/auth/register', async (req, res) => {
 
         res.status(201).json({
             message: 'User registered successfully',
-            user: data
+            user: {
+                id: data.id,
+                username: data.username,
+                chat_id: data.chat_id,
+                first_name: data.first_name,
+                bio: null // Explicitly null so the frontend knows setup is pending
+            }
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -231,7 +237,8 @@ app.post('/api/auth/login', async (req, res) => {
                 id: user.id,
                 username: user.username,
                 chat_id: user.chat_id,
-                first_name: user.first_name
+                first_name: user.first_name,
+                bio: user.bio // This powers our refresh guard!
             }
         });
     } catch (err) {
