@@ -18,7 +18,7 @@ const io = new Server(server, {
 });
 
 // A local tracker mapping user database IDs to their active live connection socket
-const activeUsers = new Map(); 
+const activeUsers = new Map();
 
 io.on('connection', (socket) => {
     // When a user logs in or verifies session on frontend, they send their ID
@@ -276,7 +276,41 @@ app.post('/api/auth/logout', (req, res) => {
     });
     res.status(200).json({ message: 'Logged out cleanly.' });
 });
+// ==========================================
+// 👤 USER PROFILE API
+// ==========================================
 
+// Complete Profile Setup (Bio, Birthday)
+app.put('/api/users/profile', requireAuth, async (req, res) => {
+    const userId = req.user.id;
+    let { bio, birth_month, birth_day } = req.body;
+
+    // Sanitize the inputs
+    bio = sanitizeInput(bio);
+
+    try {
+        const { data, error } = await supabase
+            .from('users')
+            .update({
+                bio: bio,
+                birth_month: birth_month,
+                birth_day: birth_day
+            })
+            .eq('id', userId)
+            .select('bio, birth_month, birth_day')
+            .single();
+
+        if (error) throw error;
+
+        res.status(200).json({
+            message: 'Profile updated successfully',
+            profile: data
+        });
+    } catch (err) {
+        console.error("Profile Update Error:", err);
+        res.status(500).json({ error: 'Failed to update profile.' });
+    }
+});
 // HEALTH ENDPOINT
 app.get('/health', (req, res) => {
     res.status(200).json({
@@ -364,7 +398,7 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                 users!contacts_contact_user_id_fkey (id, username, chat_id)
             `)
             .eq('user_id', myId);
-            
+
         if (error) throw error;
 
         // Flatten data and inject the is_favorite boolean
@@ -458,11 +492,11 @@ app.post('/api/messages', requireAuth, async (req, res) => {
         // Save to Database
         const { data: newMessage, error } = await supabase
             .from('messages')
-            .insert([{ 
-                sender_id: myId, 
-                receiver_id: receiver_id, 
+            .insert([{
+                sender_id: myId,
+                receiver_id: receiver_id,
                 message_text: message_text,
-                is_read: false 
+                is_read: false
             }])
             .select()
             .single();
