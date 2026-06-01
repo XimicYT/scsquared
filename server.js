@@ -325,29 +325,69 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
     }
 });
 
-// 2. Get All Contacts
+// 2. Get All Contacts (Updated to include favorites)
 app.get('/api/contacts', requireAuth, async (req, res) => {
     const myId = req.user.id;
-
     try {
         const { data: contacts, error } = await supabase
             .from('contacts')
             .select(`
-        contact_user_id,
-        users!contacts_contact_user_id_fkey (id, username, chat_id)
-    `) // ✅ GOOD: Locked down
+                is_favorite,
+                users!contacts_contact_user_id_fkey (id, username, chat_id)
+            `)
             .eq('user_id', myId);
+            
         if (error) throw error;
 
-        // Safely map the data. If contacts is null, default to an empty array []
+        // Flatten data and inject the is_favorite boolean
         const formattedContacts = (contacts || [])
-            .map(c => c.users)
-            .filter(user => user !== null);
+            .filter(c => c.users !== null)
+            .map(c => ({
+                ...c.users,
+                is_favorite: c.is_favorite
+            }));
 
         res.status(200).json({ contacts: formattedContacts });
     } catch (err) {
         console.error("GET Contacts Error:", err);
         res.status(500).json({ error: 'Server error while fetching contacts.' });
+    }
+});
+
+// 3. Remove Contact (Mutual Deletion - FIX)
+app.delete('/api/contacts/:contact_id', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    const contactId = req.params.contact_id; // Extracting from URL, not body
+
+    try {
+        // Delete the relationship in both directions
+        await supabase.from('contacts').delete().match({ user_id: myId, contact_user_id: contactId });
+        await supabase.from('contacts').delete().match({ user_id: contactId, contact_user_id: myId });
+
+        res.status(200).json({ message: 'Contact removed successfully.' });
+    } catch (err) {
+        console.error("DELETE Contact Error:", err);
+        res.status(500).json({ error: 'Server error while removing contact.' });
+    }
+});
+
+// 4. Toggle Favorite
+app.patch('/api/contacts/favorite', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    const { contact_id, is_favorite } = req.body;
+
+    try {
+        // Only update MY connection to them, don't force them to favorite me!
+        const { error } = await supabase
+            .from('contacts')
+            .update({ is_favorite: is_favorite })
+            .match({ user_id: myId, contact_user_id: contact_id });
+
+        if (error) throw error;
+        res.status(200).json({ message: 'Favorites updated.' });
+    } catch (err) {
+        console.error("PATCH Favorite Error:", err);
+        res.status(500).json({ error: 'Server error updating favorites.' });
     }
 });
 app.listen(PORT, () => {
