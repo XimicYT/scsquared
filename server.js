@@ -276,6 +276,20 @@ app.post('/api/auth/logout', (req, res) => {
     });
     res.status(200).json({ message: 'Logged out cleanly.' });
 });
+// --- Add this middleware near your other routes ---
+// Middleware to protect routes and identify the user
+const requireAuth = (req, res, next) => {
+    const token = req.cookies.sc_token;
+    if (!token) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded; // Attach user payload (contains id) to request
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Session expired or invalid.' });
+    }
+};
 // ==========================================
 // 👤 USER PROFILE API
 // ==========================================
@@ -323,20 +337,7 @@ app.get('/health', (req, res) => {
 });
 
 
-// --- Add this middleware near your other routes ---
-// Middleware to protect routes and identify the user
-const requireAuth = (req, res, next) => {
-    const token = req.cookies.sc_token;
-    if (!token) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
 
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded; // Attach user payload (contains id) to request
-        next();
-    } catch (err) {
-        return res.status(401).json({ error: 'Session expired or invalid.' });
-    }
-};
 
 // --- CONTACTS ROUTES ---
 
