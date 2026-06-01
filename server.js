@@ -260,6 +260,98 @@ app.get('/health', (req, res) => {
     });
 });
 
+
+// --- Add this middleware near your other routes ---
+// Middleware to protect routes and identify the user
+const requireAuth = (req, res, next) => {
+    const token = req.cookies.sc_token;
+    if (!token) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded; // Attach user payload (contains id) to request
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Session expired or invalid.' });
+    }
+};
+
+// --- CONTACTS ROUTES ---
+
+// 1. Add a Contact
+app.post('/api/contacts/add', requireAuth, async (req, res) => {
+    const { friend_chat_id } = req.body;
+    const myId = req.user.id;
+
+    try {
+        // Find the user they are trying to add
+        const { data: friend, error: friendError } = await supabase
+            .from('users')
+            .select('id, username, first_name')
+            .eq('chat_id', friend_chat_id)
+            .single();
+
+        if (friendError || !friend) {
+            return res.status(404).json({ error: 'User with that Chat ID not found.' });
+        }
+
+        if (friend.id === myId) {
+            return res.status(400).json({ error: 'You cannot add yourself.' });
+        }
+
+        // Check if contact already exists
+        const { data: existingContact } = await supabase
+            .from('contacts')
+            .select('*')
+            .eq('user_id', myId)
+            .eq('contact_user_id', friend.id)
+            .single();
+
+        if (existingContact) {
+            return res.status(400).json({ error: 'User is already in your contacts.' });
+        }
+
+        // Insert into contacts (One-way relationship for now, like following)
+        const { error: insertError } = await supabase
+            .from('contacts')
+            .insert([{ user_id: myId, contact_user_id: friend.id }]);
+
+        if (insertError) throw insertError;
+
+        res.status(200).json({ message: `${friend.first_name} added to contacts!`, friend });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Server error while adding contact.' });
+    }
+});
+
+// 2. Get All Contacts
+app.get('/api/contacts', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+
+    try {
+        // Fetch contacts and join with the users table to get their details
+        // Note: This assumes you have a foreign key set up on contact_user_id -> users(id)
+        const { data: contacts, error } = await supabase
+            .from('contacts')
+            .select(`
+                contact_user_id,
+                users!contact_user_id (id, first_name, username, chat_id)
+            `)
+            .eq('user_id', myId);
+
+        if (error) throw error;
+
+        // Flatten the data structure slightly for the frontend
+        const formattedContacts = contacts.map(c => c.users);
+
+        res.status(200).json({ contacts: formattedContacts });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to fetch contacts.' });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
