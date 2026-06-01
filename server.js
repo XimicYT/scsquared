@@ -419,6 +419,70 @@ app.patch('/api/contacts/favorite', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error updating favorites.' });
     }
 });
+
+// ==========================================
+// 💬 MESSAGES API
+// ==========================================
+
+// 1. Get Chat History with a specific user
+app.get('/api/messages/:contactId', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    const contactId = req.params.contactId;
+
+    try {
+        // Fetch messages where I am sender & they are receiver, OR they are sender & I am receiver
+        const { data: messages, error } = await supabase
+            .from('messages')
+            .select('*')
+            .or(`and(sender_id.eq.${myId},receiver_id.eq.${contactId}),and(sender_id.eq.${contactId},receiver_id.eq.${myId})`)
+            .order('created_at', { ascending: true }); // Oldest to newest
+
+        if (error) throw error;
+        res.status(200).json(messages);
+    } catch (err) {
+        console.error("Fetch Messages Error:", err);
+        res.status(500).json({ error: 'Failed to load messages.' });
+    }
+});
+
+// 2. Send a Message
+app.post('/api/messages', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    const { receiver_id, message_text } = req.body;
+
+    if (!receiver_id || !message_text) {
+        return res.status(400).json({ error: "Missing receiver or message text." });
+    }
+
+    try {
+        // Save to Database
+        const { data: newMessage, error } = await supabase
+            .from('messages')
+            .insert([{ 
+                sender_id: myId, 
+                receiver_id: receiver_id, 
+                message_text: message_text,
+                is_read: false 
+            }])
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // 🚀 LIVE EMISSION: Check if the receiver is online and send it instantly!
+        const receiverSocketId = activeUsers.get(receiver_id);
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('receive_message', newMessage);
+        }
+
+        res.status(201).json(newMessage);
+    } catch (err) {
+        console.error("Send Message Error:", err);
+        res.status(500).json({ error: 'Failed to send message.' });
+    }
+});
+
+
 server.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
