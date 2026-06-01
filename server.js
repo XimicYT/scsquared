@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken'); // 🌟 Added JWT
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
@@ -32,9 +33,8 @@ async function generateUniqueChatId() {
     throw new Error('Failed to generate a unique Chat ID');
 }
 
-// 1. REGISTER ENDPOINT (UPDATED)
+// 1. REGISTER ENDPOINT
 app.post('/api/auth/register', async (req, res) => {
-    // We now accept first_name and email alongside the others
     const { first_name, username, email, password } = req.body;
 
     if (!username || !password || !first_name || !email) {
@@ -45,12 +45,11 @@ app.post('/api/auth/register', async (req, res) => {
         const passwordHash = await bcrypt.hash(password, 10);
         const chatId = await generateUniqueChatId();
 
-        // Insert the new fields into Supabase
         const { data, error } = await supabase
             .from('users')
             .insert([{
                 first_name: first_name,
-                username: username, // This is the Display Name
+                username: username, // Display Name
                 email: email,
                 password_hash: passwordHash,
                 chat_id: chatId
@@ -59,7 +58,6 @@ app.post('/api/auth/register', async (req, res) => {
             .single();
 
         if (error) {
-            // Handle duplicate email or username errors cleanly
             if (error.code === '23505') {
                 throw new Error("That email or display name is already taken.");
             }
@@ -71,7 +69,7 @@ app.post('/api/auth/register', async (req, res) => {
     }
 });
 
-// LOGIN ENDPOINT (UPDATED PHRASING)
+// 2. LOGIN ENDPOINT (Generates JWT)
 app.post('/api/auth/login', async (req, res) => {
     const { login_identifier, password } = req.body;
 
@@ -86,26 +84,69 @@ app.post('/api/auth/login', async (req, res) => {
             .or(`chat_id.eq.${login_identifier},username.eq.${login_identifier}`)
             .single();
 
-        // Replaced "Nah" with "Nope"
         if (error || !user) {
             throw new Error("Nope, that's not the right login.");
         }
 
         const passwordMatch = await bcrypt.compare(password, user.password_hash);
-        // Replaced "Nah" with "Nope"
         if (!passwordMatch) {
             throw new Error("Nope, that's not the right login.");
         }
 
+        // 🌟 Create the secure token! (Valid for 24 hours)
+        const token = jwt.sign(
+            { id: user.id, username: user.username },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+
         res.status(200).json({
             message: 'Login successful',
-            user: { id: user.id, username: user.username, chat_id: user.chat_id, first_name: user.first_name }
+            user: { 
+                id: user.id, 
+                username: user.username, 
+                chat_id: user.chat_id, 
+                first_name: user.first_name,
+                token: token // Send token to frontend
+            }
         });
     } catch (err) {
         res.status(401).json({ error: err.message });
     }
 });
-// HEALTH ENDPOINT (To keep the server awake via cron job)
+
+// 3. SECURE VERIFICATION ENDPOINT
+app.get('/api/auth/verify', async (req, res) => {
+    try {
+        const authHeader = req.headers['authorization'];
+        const token = authHeader && authHeader.split(' ')[1]; // Extract token from "Bearer <TOKEN>"
+
+        if (!token) {
+            return res.status(401).json({ error: 'Access denied. No token provided.' });
+        }
+
+        // Verify the token using your Render environment secret
+        const verifiedData = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Security check: Ensure the user still exists in Supabase
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('id')
+            .eq('id', verifiedData.id)
+            .single();
+
+        if (error || !user) {
+            return res.status(401).json({ error: 'Session invalid. User no longer exists.' });
+        }
+
+        // Token is valid!
+        res.status(200).json({ authenticated: true });
+    } catch (err) {
+        res.status(401).json({ error: 'Invalid or expired secure token.' });
+    }
+});
+
+// HEALTH ENDPOINT
 app.get('/health', (req, res) => {
     res.status(200).json({
         status: 'OK',
@@ -113,6 +154,7 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString()
     });
 });
+
 app.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
