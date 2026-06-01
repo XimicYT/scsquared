@@ -24,7 +24,7 @@ app.use(cors({
 
 app.use(express.json());
 
-// 🌟 Lightweight Cookie Parser Middleware (No external dependency needed)
+// Lightweight Cookie Parser Middleware (No external dependency needed)
 app.use((req, res, next) => {
     req.cookies = {};
     const cookieHeader = req.headers.cookie;
@@ -37,7 +37,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// 🌟 INPUT SANITIZATION UTILITY (Prevents Stored XSS Injection)
+// INPUT SANITIZATION UTILITY (Prevents Stored XSS Injection)
 function sanitizeInput(str) {
     if (typeof str !== 'string') return '';
     return str
@@ -50,7 +50,7 @@ function sanitizeInput(str) {
         .replace(/\//g, '&#x2F;');
 }
 
-// 🌟 BACKEND STRUCTURAL INPUT VALIDATORS
+// BACKEND STRUCTURAL INPUT VALIDATORS
 function isValidEmail(email) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     return emailRegex.test(email);
@@ -71,13 +71,29 @@ async function generateUniqueChatId() {
             .from('users')
             .select('chat_id')
             .eq('chat_id', randomId)
-            .single();
+            .maybeSingle(); // safer modifier to check rows without throwing exceptions
 
         if (!data) return randomId; 
         attempts++;
     }
     throw new Error('Failed to generate a unique Chat ID');
 }
+
+// ─── NEW MIDDLEWARE: REQUIRE AUTHENTICATION ──────────────────────────────────
+// Protects routes and securely parses user info out of the HttpOnly session cookie
+const requireAuth = (req, res, next) => {
+    const token = req.cookies.sc_token;
+    if (!token) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded; // Attach user payload (id, username) to request object
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Session expired or invalid.' });
+    }
+};
+
 
 // 1. REGISTER ENDPOINT (With Validation, Sanitization & Cookie Delivery)
 app.post('/api/auth/register', async (req, res) => {
@@ -87,14 +103,10 @@ app.post('/api/auth/register', async (req, res) => {
         return res.status(400).json({ error: 'All fields are required.' });
     }
 
-    // Sanitize and normalize string inputs
     first_name = sanitizeInput(first_name);
     username = sanitizeInput(username);
     email = email.trim().toLowerCase();
 
-    // server.js - Inside the /api/auth/register route
-
-    // Execute backend integrity checks
     if (first_name.length < 1 || first_name.length > 50) {
         return res.status(400).json({ error: 'First name must be between 1 and 50 characters.' });
     }
@@ -104,8 +116,6 @@ app.post('/api/auth/register', async (req, res) => {
     if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Please present a valid email address.' });
     }
-
-    // 🌟 FIX 3: Balanced Password Rule for Casual Use
     if (password.length < 5) {
         return res.status(400).json({ error: 'Password must be at least 5 characters long.' });
     }
@@ -133,19 +143,17 @@ app.post('/api/auth/register', async (req, res) => {
             throw error;
         }
 
-        // Auto-login upon registration: Create token
         const token = jwt.sign(
             { id: data.id, username: data.username },
             process.env.JWT_SECRET,
             { expiresIn: '24h' }
         );
 
-        // Deliver token safely hidden inside HttpOnly cookie
         res.cookie('sc_token', token, {
             httpOnly: true,
-            secure: true,       // Enforces HTTPS (Render handles this natively)
-            sameSite: 'None',   // Required for cross-site cookie transit
-            maxAge: 24 * 60 * 60 * 1000 // 24 Hours
+            secure: true,       
+            sameSite: 'None',   
+            maxAge: 24 * 60 * 60 * 1000 
         });
 
         res.status(201).json({ 
@@ -183,14 +191,12 @@ app.post('/api/auth/login', async (req, res) => {
             throw new Error("Nope, that's not the right login.");
         }
 
-        // Generate the token payload
         const token = jwt.sign(
             { id: user.id, username: user.username },
             process.env.JWT_SECRET,
             { expiresIn: '24h' }
         );
 
-        // Bake cookie directly into response headers
         res.cookie('sc_token', token, {
             httpOnly: true,
             secure: true,
@@ -198,7 +204,6 @@ app.post('/api/auth/login', async (req, res) => {
             maxAge: 24 * 60 * 60 * 1000
         });
 
-        // Token is cleanly absent from the response body payload!
         res.status(200).json({
             message: 'Login successful',
             user: { 
@@ -216,7 +221,6 @@ app.post('/api/auth/login', async (req, res) => {
 // 3. SECURE VERIFICATION ENDPOINT (Reads Cookie)
 app.get('/api/auth/verify', async (req, res) => {
     try {
-        // Read cookie value extracted from header by middleware
         const token = req.cookies.sc_token;
 
         if (!token) {
@@ -251,45 +255,57 @@ app.post('/api/auth/logout', (req, res) => {
     res.status(200).json({ message: 'Logged out cleanly.' });
 });
 
-// HEALTH ENDPOINT
-app.get('/health', (req, res) => {
-    res.status(200).json({
-        status: 'OK',
-        message: 'Server is awake!',
-        timestamp: new Date().toISOString()
-    });
-});
 
+// ─── NEW APP APPLICATION ROUTES: CONTACTS SYSTEM ─────────────────────────────
 
-// --- Add this middleware near your other routes ---
-// Middleware to protect routes and identify the user
-const requireAuth = (req, res, next) => {
-    const token = req.cookies.sc_token;
-    if (!token) return res.status(401).json({ error: 'Unauthorized. Please log in.' });
+// 5. GET ALL CONTACTS (Bulletproof Two-Step Query Approach)
+app.get('/api/contacts', requireAuth, async (req, res) => {
+    const myId = req.user.id;
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded; // Attach user payload (contains id) to request
-        next();
+        // Step 1: Gather raw row logs from contacts linking to this user's account
+        const { data: rawContacts, error: contactsError } = await supabase
+            .from('contacts')
+            .select('contact_user_id')
+            .eq('user_id', myId);
+
+        if (contactsError) throw contactsError;
+
+        // If no records are found, cleanly return an empty array instead of failing
+        if (!rawContacts || rawContacts.length === 0) {
+            return res.status(200).json({ contacts: [] });
+        }
+
+        // Map data rows down into a simple array of UUID strings
+        const contactIds = rawContacts.map(row => row.contact_user_id);
+
+        // Step 2: Grab public info from users table targeting only matches in our array
+        const { data: profiles, error: profilesError } = await supabase
+            .from('users')
+            .select('id, first_name, username, chat_id')
+            .in('id', contactIds);
+
+        if (profilesError) throw profilesError;
+
+        res.status(200).json({ contacts: profiles });
     } catch (err) {
-        return res.status(401).json({ error: 'Session expired or invalid.' });
+        console.error("Internal API failure loading contacts:", err.message);
+        res.status(500).json({ error: 'Failed to fetch network directory.' });
     }
-};
+});
 
-// --- CONTACTS ROUTES ---
-
-// 1. Add a Contact
+// 6. ADD A NEW CONTACT
 app.post('/api/contacts/add', requireAuth, async (req, res) => {
     const { friend_chat_id } = req.body;
     const myId = req.user.id;
 
     try {
-        // Find the user they are trying to add
+        // Find the user targeted by the provided 6-digit ID
         const { data: friend, error: friendError } = await supabase
             .from('users')
             .select('id, username, first_name')
             .eq('chat_id', friend_chat_id)
-            .single();
+            .maybeSingle();
 
         if (friendError || !friend) {
             return res.status(404).json({ error: 'User with that Chat ID not found.' });
@@ -299,19 +315,19 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
             return res.status(400).json({ error: 'You cannot add yourself.' });
         }
 
-        // Check if contact already exists
+        // See if relation log link already exists
         const { data: existingContact } = await supabase
             .from('contacts')
             .select('*')
             .eq('user_id', myId)
             .eq('contact_user_id', friend.id)
-            .single();
+            .maybeSingle();
 
         if (existingContact) {
             return res.status(400).json({ error: 'User is already in your contacts.' });
         }
 
-        // Insert into contacts (One-way relationship for now, like following)
+        // Write link to contacts table
         const { error: insertError } = await supabase
             .from('contacts')
             .insert([{ user_id: myId, contact_user_id: friend.id }]);
@@ -320,36 +336,19 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
 
         res.status(200).json({ message: `${friend.first_name} added to contacts!`, friend });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Server error while adding contact.' });
+        console.error("Internal API failure adding contact:", err.message);
+        res.status(500).json({ error: 'Server error while modifying contacts.' });
     }
 });
 
-// 2. Get All Contacts
-app.get('/api/contacts', requireAuth, async (req, res) => {
-    const myId = req.user.id;
 
-    try {
-        // Fetch contacts and join with the users table to get their details
-        // Note: This assumes you have a foreign key set up on contact_user_id -> users(id)
-        const { data: contacts, error } = await supabase
-            .from('contacts')
-            .select(`
-                contact_user_id,
-                users!contact_user_id (id, first_name, username, chat_id)
-            `)
-            .eq('user_id', myId);
-
-        if (error) throw error;
-
-        // Flatten the data structure slightly for the frontend
-        const formattedContacts = contacts.map(c => c.users);
-
-        res.status(200).json({ contacts: formattedContacts });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch contacts.' });
-    }
+// HEALTH ENDPOINT
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'OK',
+        message: 'Server is awake!',
+        timestamp: new Date().toISOString()
+    });
 });
 
 app.listen(PORT, () => {
