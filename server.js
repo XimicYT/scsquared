@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken'); 
+const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
@@ -18,7 +18,7 @@ app.use(cors({
         // By passing 'true' back, we dynamically allow whatever origin made the request.
         // NOTE: Change this back to an array of specific URLs before final production!
         callback(null, true);
-    }, 
+    },
     credentials: true // Crucial to allow cross-origin HttpOnly cookies
 }));
 
@@ -73,7 +73,7 @@ async function generateUniqueChatId() {
             .eq('chat_id', randomId)
             .single();
 
-        if (!data) return randomId; 
+        if (!data) return randomId;
         attempts++;
     }
     throw new Error('Failed to generate a unique Chat ID');
@@ -118,7 +118,7 @@ app.post('/api/auth/register', async (req, res) => {
             .from('users')
             .insert([{
                 first_name: first_name,
-                username: username, 
+                username: username,
                 email: email,
                 password_hash: passwordHash,
                 chat_id: chatId
@@ -148,9 +148,9 @@ app.post('/api/auth/register', async (req, res) => {
             maxAge: 24 * 60 * 60 * 1000 // 24 Hours
         });
 
-        res.status(201).json({ 
-            message: 'User registered successfully', 
-            user: data 
+        res.status(201).json({
+            message: 'User registered successfully',
+            user: data
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -201,10 +201,10 @@ app.post('/api/auth/login', async (req, res) => {
         // Token is cleanly absent from the response body payload!
         res.status(200).json({
             message: 'Login successful',
-            user: { 
-                id: user.id, 
-                username: user.username, 
-                chat_id: user.chat_id, 
+            user: {
+                id: user.id,
+                username: user.username,
+                chat_id: user.chat_id,
                 first_name: user.first_name
             }
         });
@@ -332,28 +332,28 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
     const myId = req.user.id;
 
     try {
-        // Fetch contacts and join with the users table to get their details
-        // Note: This assumes you have a foreign key set up on contact_user_id -> users(id)
+        // EXPLICITLY name the foreign key so Supabase doesn't get confused
         const { data: contacts, error } = await supabase
             .from('contacts')
             .select(`
                 contact_user_id,
-                users!contact_user_id (id, first_name, username, chat_id)
+                users!contacts_contact_user_id_fkey (id, first_name, username, chat_id)
             `)
             .eq('user_id', myId);
 
         if (error) throw error;
 
-        // Flatten the data structure slightly for the frontend
-        const formattedContacts = contacts.map(c => c.users);
+        // Safely map the data. If contacts is null, default to an empty array []
+        const formattedContacts = (contacts || [])
+            .map(c => c.users)
+            .filter(user => user !== null);
 
         res.status(200).json({ contacts: formattedContacts });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch contacts.' });
+        console.error("GET Contacts Error:", err);
+        res.status(500).json({ error: 'Server error while fetching contacts.' });
     }
 });
-
 app.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
