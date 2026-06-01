@@ -4,9 +4,35 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
+const http = require('http');
+const { Server } = require('socket.io');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: true, // Matches your dynamic CORS configuration
+        credentials: true
+    }
+});
+
+// A local tracker mapping user database IDs to their active live connection socket
+const activeUsers = new Map(); 
+
+io.on('connection', (socket) => {
+    // When a user logs in or verifies session on frontend, they send their ID
+    socket.on('register', (userId) => {
+        activeUsers.set(userId, socket.id);
+    });
+
+    // Clean up from the tracker when they close the browser tab
+    socket.on('disconnect', () => {
+        activeUsers.forEach((value, key) => {
+            if (value === socket.id) activeUsers.delete(key);
+        });
+    });
+});
 
 // Initialize Supabase Client
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -317,7 +343,9 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
                 { user_id: friend.id, contact_user_id: myId } // This line makes it mutual
             ]);
         if (insertError) throw insertError;
-
+        // Live alert the added user to update their screen instantly
+        const friendSocket = activeUsers.get(friend.id);
+        if (friendSocket) io.to(friendSocket).emit('contacts_updated');
         res.status(200).json({ message: `${friend.username} added to contacts!`, friend });
     } catch (err) {
         console.error(err);
@@ -363,7 +391,8 @@ app.delete('/api/contacts/:contact_id', requireAuth, async (req, res) => {
         // Delete the relationship in both directions
         await supabase.from('contacts').delete().match({ user_id: myId, contact_user_id: contactId });
         await supabase.from('contacts').delete().match({ user_id: contactId, contact_user_id: myId });
-
+        const friendSocket = activeUsers.get(contactId);
+        if (friendSocket) io.to(friendSocket).emit('contacts_updated');
         res.status(200).json({ message: 'Contact removed successfully.' });
     } catch (err) {
         console.error("DELETE Contact Error:", err);
@@ -390,6 +419,6 @@ app.patch('/api/contacts/favorite', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error updating favorites.' });
     }
 });
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
