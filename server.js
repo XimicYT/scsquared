@@ -280,10 +280,10 @@ app.post('/api/auth/logout', (req, res) => {
 // 👤 USER PROFILE API
 // ==========================================
 
-// Complete Profile Setup (Bio, Birthday)
+// Complete Profile Setup (Bio, Birthday, Color, Timezone)
 app.put('/api/users/profile', requireAuth, async (req, res) => {
     const userId = req.user.id;
-    let { bio, birth_month, birth_day } = req.body;
+    let { bio, birth_month, birth_day, custom_color, timezone } = req.body;
 
     // Sanitize the inputs
     bio = sanitizeInput(bio);
@@ -294,10 +294,12 @@ app.put('/api/users/profile', requireAuth, async (req, res) => {
             .update({
                 bio: bio,
                 birth_month: birth_month,
-                birth_day: birth_day
+                birth_day: birth_day,
+                custom_color: custom_color,
+                timezone: timezone
             })
             .eq('id', userId)
-            .select('bio, birth_month, birth_day')
+            .select('bio, birth_month, birth_day, custom_color, timezone')
             .single();
 
         if (error) throw error;
