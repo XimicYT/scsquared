@@ -13,9 +13,12 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// 🌟 CRITICAL CONFIG: Update origin array with your exact frontend deployment URL
 app.use(cors({
-    origin: '*', 
+    origin: function (origin, callback) {
+        // By passing 'true' back, we dynamically allow whatever origin made the request.
+        // NOTE: Change this back to an array of specific URLs before final production!
+        callback(null, true);
+    }, 
     credentials: true // Crucial to allow cross-origin HttpOnly cookies
 }));
 
