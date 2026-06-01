@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken'); // 🌟 Added JWT
+const jwt = require('jsonwebtoken'); 
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
@@ -13,8 +13,51 @@ const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-app.use(cors());
+// 🌟 CRITICAL CONFIG: Update origin array with your exact frontend deployment URL
+app.use(cors({
+    origin: ['http://127.0.0.1:5500', 'http://localhost:5500', 'https://your-frontend-domain.com'], 
+    credentials: true // Crucial to allow cross-origin HttpOnly cookies
+}));
+
 app.use(express.json());
+
+// 🌟 Lightweight Cookie Parser Middleware (No external dependency needed)
+app.use((req, res, next) => {
+    req.cookies = {};
+    const cookieHeader = req.headers.cookie;
+    if (cookieHeader) {
+        cookieHeader.split(';').forEach(cookie => {
+            const parts = cookie.split('=');
+            req.cookies[parts[0].trim()] = parts[1] ? decodeURIComponent(parts[1].trim()) : '';
+        });
+    }
+    next();
+});
+
+// 🌟 INPUT SANITIZATION UTILITY (Prevents Stored XSS Injection)
+function sanitizeInput(str) {
+    if (typeof str !== 'string') return '';
+    return str
+        .trim()
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .replace(/\//g, '&#x2F;');
+}
+
+// 🌟 BACKEND STRUCTURAL INPUT VALIDATORS
+function isValidEmail(email) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return emailRegex.test(email);
+}
+
+function isValidUsername(username) {
+    // Alphanumeric, underscores, or hyphens; 3-20 characters long
+    const usernameRegex = /^[a-zA-Z0-9_-]{3,20}$/;
+    return usernameRegex.test(username);
+}
 
 // Helper function to generate a truly unique 6-digit ID
 async function generateUniqueChatId() {
@@ -27,18 +70,37 @@ async function generateUniqueChatId() {
             .eq('chat_id', randomId)
             .single();
 
-        if (!data) return randomId; // ID is unique and available
+        if (!data) return randomId; 
         attempts++;
     }
     throw new Error('Failed to generate a unique Chat ID');
 }
 
-// 1. REGISTER ENDPOINT
+// 1. REGISTER ENDPOINT (With Validation, Sanitization & Cookie Delivery)
 app.post('/api/auth/register', async (req, res) => {
-    const { first_name, username, email, password } = req.body;
+    let { first_name, username, email, password } = req.body;
 
     if (!username || !password || !first_name || !email) {
         return res.status(400).json({ error: 'All fields are required.' });
+    }
+
+    // Sanitize and normalize string inputs
+    first_name = sanitizeInput(first_name);
+    username = sanitizeInput(username);
+    email = email.trim().toLowerCase();
+
+    // Execute backend integrity checks
+    if (first_name.length < 1 || first_name.length > 50) {
+        return res.status(400).json({ error: 'First name must be between 1 and 50 characters.' });
+    }
+    if (!isValidUsername(username)) {
+        return res.status(400).json({ error: 'Username must be 3-20 characters long and contain only alphanumeric characters, underscores, or hyphens.' });
+    }
+    if (!isValidEmail(email)) {
+        return res.status(400).json({ error: 'Please present a valid email address.' });
+    }
+    if (password.length < 8) {
+        return res.status(400).json({ error: 'Password is too short. Enforce a minimum of 8 characters.' });
     }
 
     try {
@@ -49,7 +111,7 @@ app.post('/api/auth/register', async (req, res) => {
             .from('users')
             .insert([{
                 first_name: first_name,
-                username: username, // Display Name
+                username: username, 
                 email: email,
                 password_hash: passwordHash,
                 chat_id: chatId
@@ -59,23 +121,44 @@ app.post('/api/auth/register', async (req, res) => {
 
         if (error) {
             if (error.code === '23505') {
-                throw new Error("That email or display name is already taken.");
+                return res.status(400).json({ error: "That email or username is already taken." });
             }
             throw error;
         }
-        res.status(201).json({ message: 'User registered successfully', user: data });
+
+        // Auto-login upon registration: Create token
+        const token = jwt.sign(
+            { id: data.id, username: data.username },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+
+        // Deliver token safely hidden inside HttpOnly cookie
+        res.cookie('sc_token', token, {
+            httpOnly: true,
+            secure: true,       // Enforces HTTPS (Render handles this natively)
+            sameSite: 'None',   // Required for cross-site cookie transit
+            maxAge: 24 * 60 * 60 * 1000 // 24 Hours
+        });
+
+        res.status(201).json({ 
+            message: 'User registered successfully', 
+            user: data 
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
 
-// 2. LOGIN ENDPOINT (Generates JWT)
+// 2. LOGIN ENDPOINT (Generates secure HttpOnly Cookie)
 app.post('/api/auth/login', async (req, res) => {
-    const { login_identifier, password } = req.body;
+    let { login_identifier, password } = req.body;
 
     if (!login_identifier || !password) {
         return res.status(400).json({ error: 'Please enter your tag or display name, and password.' });
     }
+
+    login_identifier = sanitizeInput(login_identifier);
 
     try {
         const { data: user, error } = await supabase
@@ -93,21 +176,29 @@ app.post('/api/auth/login', async (req, res) => {
             throw new Error("Nope, that's not the right login.");
         }
 
-        // 🌟 Create the secure token! (Valid for 24 hours)
+        // Generate the token payload
         const token = jwt.sign(
             { id: user.id, username: user.username },
             process.env.JWT_SECRET,
             { expiresIn: '24h' }
         );
 
+        // Bake cookie directly into response headers
+        res.cookie('sc_token', token, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'None',
+            maxAge: 24 * 60 * 60 * 1000
+        });
+
+        // Token is cleanly absent from the response body payload!
         res.status(200).json({
             message: 'Login successful',
             user: { 
                 id: user.id, 
                 username: user.username, 
                 chat_id: user.chat_id, 
-                first_name: user.first_name,
-                token: token // Send token to frontend
+                first_name: user.first_name
             }
         });
     } catch (err) {
@@ -115,20 +206,18 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// 3. SECURE VERIFICATION ENDPOINT
+// 3. SECURE VERIFICATION ENDPOINT (Reads Cookie)
 app.get('/api/auth/verify', async (req, res) => {
     try {
-        const authHeader = req.headers['authorization'];
-        const token = authHeader && authHeader.split(' ')[1]; // Extract token from "Bearer <TOKEN>"
+        // Read cookie value extracted from header by middleware
+        const token = req.cookies.sc_token;
 
         if (!token) {
             return res.status(401).json({ error: 'Access denied. No token provided.' });
         }
 
-        // Verify the token using your Render environment secret
         const verifiedData = jwt.verify(token, process.env.JWT_SECRET);
 
-        // Security check: Ensure the user still exists in Supabase
         const { data: user, error } = await supabase
             .from('users')
             .select('id')
@@ -139,11 +228,20 @@ app.get('/api/auth/verify', async (req, res) => {
             return res.status(401).json({ error: 'Session invalid. User no longer exists.' });
         }
 
-        // Token is valid!
         res.status(200).json({ authenticated: true });
     } catch (err) {
         res.status(401).json({ error: 'Invalid or expired secure token.' });
     }
+});
+
+// 4. LOGOUT ENDPOINT (Clears browser Cookie)
+app.post('/api/auth/logout', (req, res) => {
+    res.clearCookie('sc_token', {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'None'
+    });
+    res.status(200).json({ message: 'Logged out cleanly.' });
 });
 
 // HEALTH ENDPOINT
