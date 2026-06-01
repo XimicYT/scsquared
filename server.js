@@ -105,6 +105,14 @@ app.post('/api/auth/login', async (req, res) => {
         res.status(401).json({ error: err.message });
     }
 });
+// HEALTH ENDPOINT (To keep the server awake via cron job)
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'OK',
+        message: 'Server is awake!',
+        timestamp: new Date().toISOString()
+    });
+});
 app.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
