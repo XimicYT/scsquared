@@ -284,13 +284,11 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
     const myId = req.user.id;
 
     try {
-        // Find the user they are trying to add
         const { data: friend, error: friendError } = await supabase
             .from('users')
-            .select('id, username, first_name')
-            .eq('chat_id', friend_chat_id)
+            .select('id, username') // ✅ GOOD: Strictly usernames
+            .eq('chat_id', req.body.friend_chat_id)
             .single();
-
         if (friendError || !friend) {
             return res.status(404).json({ error: 'User with that Chat ID not found.' });
         }
@@ -320,7 +318,7 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
             ]);
         if (insertError) throw insertError;
 
-        res.status(200).json({ message: `${friend.first_name} added to contacts!`, friend });
+        res.status(200).json({ message: `${friend.username} added to contacts!`, friend });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Server error while adding contact.' });
@@ -332,15 +330,13 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
     const myId = req.user.id;
 
     try {
-        // EXPLICITLY name the foreign key so Supabase doesn't get confused
         const { data: contacts, error } = await supabase
             .from('contacts')
             .select(`
-                contact_user_id,
-                users!contacts_contact_user_id_fkey (id, first_name, username, chat_id)
-            `)
+        contact_user_id,
+        users!contacts_contact_user_id_fkey (id, username, chat_id)
+    `) // ✅ GOOD: Locked down
             .eq('user_id', myId);
-
         if (error) throw error;
 
         // Safely map the data. If contacts is null, default to an empty array []
