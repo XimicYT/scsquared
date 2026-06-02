@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 10000;
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: true, // Matches your dynamic CORS configuration
+        origin: true,
         credentials: true
     }
 });
@@ -20,17 +20,38 @@ const io = new Server(server, {
 // A local tracker mapping user database IDs to their active live connection socket
 const activeUsers = new Map();
 
-io.on('connection', (socket) => {
-    // When a user logs in or verifies session on frontend, they send their ID
-    socket.on('register', (userId) => {
-        activeUsers.set(userId, socket.id);
+// 🔒 FIX 1: Secure Socket Authentication Middleware
+io.use((socket, next) => {
+    const cookieHeader = socket.request.headers.cookie;
+    if (!cookieHeader) return next(new Error('Authentication error: No cookies'));
+
+    // Manual cookie parser for the websocket connection
+    const cookies = {};
+    cookieHeader.split(';').forEach(cookie => {
+        const parts = cookie.split('=');
+        cookies[parts[0].trim()] = parts[1] ? decodeURIComponent(parts[1].trim()) : '';
     });
 
-    // Clean up from the tracker when they close the browser tab
+    const token = cookies.sc_token;
+    if (!token) return next(new Error('Authentication error: Token missing'));
+
+    try {
+        // Verify the JWT exactly like the REST API does
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        socket.userId = decoded.id; // Secretly attach the verified database ID
+        next();
+    } catch (err) {
+        return next(new Error('Authentication error: Invalid token'));
+    }
+});
+
+io.on('connection', (socket) => {
+    // 🔒 We no longer wait for the client to tell us who they are. We KNOW who they are.
+    activeUsers.set(socket.userId, socket.id);
+
+    // ⚡ FIX 2: O(1) Disconnect! No more loops.
     socket.on('disconnect', () => {
-        activeUsers.forEach((value, key) => {
-            if (value === socket.id) activeUsers.delete(key);
-        });
+        activeUsers.delete(socket.userId);
     });
 });
 
@@ -397,10 +418,11 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
     }
 });
 
-// 2. Get All Contacts (Updated to include favorites)
+// 2. Get All Contacts (⚡ FIX 2: N+1 Query Fix)
 app.get('/api/contacts', requireAuth, async (req, res) => {
     const myId = req.user.id;
     try {
+        // Step 1: Get the list of contacts
         const { data: contacts, error } = await supabase
             .from('contacts')
             .select(`
@@ -410,16 +432,30 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
             .eq('user_id', myId);
 
         if (error) throw error;
+        const baseContacts = (contacts || []).filter(c => c.users !== null);
 
-        // Flatten data and inject the is_favorite boolean
-        const formattedContacts = (contacts || [])
-            .filter(c => c.users !== null)
-            .map(c => ({
+        // Step 2: Fetch the last message for each contact in parallel ON THE SERVER.
+        // This solves the frontend N+1 problem by handling the load directly next to the DB.
+        const contactsWithMessages = await Promise.all(baseContacts.map(async (c) => {
+            const friendId = c.users.id;
+            const { data: msgs } = await supabase
+                .from('messages')
+                .select('message_text, sender_id')
+                .or(`and(sender_id.eq.${myId},receiver_id.eq.${friendId}),and(sender_id.eq.${friendId},receiver_id.eq.${myId})`)
+                .order('created_at', { ascending: false })
+                .limit(1); // Only grab the very last message
+
+            const lastMsg = msgs && msgs.length > 0 ? msgs[0] : null;
+
+            return {
                 ...c.users,
-                is_favorite: c.is_favorite
-            }));
+                is_favorite: c.is_favorite,
+                last_message: lastMsg ? lastMsg.message_text : "No messages yet",
+                last_message_sender_id: lastMsg ? lastMsg.sender_id : null
+            };
+        }));
 
-        res.status(200).json({ contacts: formattedContacts });
+        res.status(200).json({ contacts: contactsWithMessages });
     } catch (err) {
         console.error("GET Contacts Error:", err);
         res.status(500).json({ error: 'Server error while fetching contacts.' });
