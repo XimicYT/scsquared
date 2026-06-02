@@ -9,7 +9,33 @@ const { Server } = require('socket.io');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const rateLimit = require('express-rate-limit');
 
+// 1. General API Rate Limiter
+// Applies to most routes: allows 100 requests per 15 minutes per IP
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per `window`
+    message: { error: "Too many requests from this IP, please try again after 15 minutes." },
+    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+
+// 2. Strict Auth Limiter 
+// Protects your Supabase DB from brute-force login/registration spam
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // Limit each IP to 10 login/register requests per window
+    message: { error: "Too many login attempts. Please try again later." }
+});
+
+// 3. Message/Attachment Limiter
+// Prevents someone from writing a script to spam messages and fill up your Cloudinary/Supabase
+const messageLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 30, // Limit each IP to 30 messages per minute
+    message: { error: "You are sending messages too quickly. Slow down!" }
+});
 // --- Cloudinary Setup ---
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -100,7 +126,7 @@ app.use(cors({
 }));
 
 app.use(express.json());
-
+app.use('/api', apiLimiter); // <-- ADD THIS LINE
 // 🌟 Lightweight Cookie Parser Middleware (No external dependency needed)
 app.use((req, res, next) => {
     req.cookies = {};
@@ -157,7 +183,7 @@ async function generateUniqueChatId() {
 }
 
 // 1. REGISTER ENDPOINT (With Validation, Sanitization & Cookie Delivery)
-app.post('/api/auth/register', async (req, res) => {
+app.post('/api/auth/register', authLimiter, async (req, res) => {
     let { first_name, username, email, password } = req.body;
 
     if (!username || !password || !first_name || !email) {
@@ -241,7 +267,7 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 // 2. LOGIN ENDPOINT (Generates secure HttpOnly Cookie)
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authLimiter, async (req, res) => {
     let { login_identifier, password } = req.body;
 
     if (!login_identifier || !password) {
@@ -556,7 +582,7 @@ app.get('/api/messages/:contactId', requireAuth, async (req, res) => {
 });
 
 // 2. Send a Message (With Optional Image Attachment)
-app.post('/api/messages', requireAuth, (req, res, next) => {
+app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
     // Catch multer errors gracefully
     upload.single('attachment')(req, res, (err) => {
         if (err) return res.status(400).json({ error: err.message });
