@@ -2,14 +2,41 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const multer = require('multer');
-const cloudinary = require('cloudinary').v2;
-const streamifier = require('streamifier');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 const http = require('http');
 const { Server } = require('socket.io');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
+// --- Cloudinary Setup ---
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Configure Multer Storage to pipe directly to Cloudinary
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'sc_chat_attachments',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'] // STRICTLY enforce images
+  }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only image files are allowed.'));
+        }
+    }
+});
 const app = express();
 const PORT = process.env.PORT || 10000;
 const server = http.createServer(app);
@@ -62,25 +89,7 @@ io.on('connection', (socket) => {
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
-// Cloudinary configuration from environment variables
-cloudinary.config({ 
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
-    api_key: process.env.CLOUDINARY_API_KEY, 
-    api_secret: process.env.CLOUDINARY_API_SECRET 
-});
 
-// Multer memory storage config with a strict 5MB limit
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MegaBytes
-    fileFilter: (req, file, cb) => {
-        if (file.mimetype.startsWith('image/')) {
-            cb(null, true);
-        } else {
-            cb(new Error('Only image files are allowed.'));
-        }
-    }
-});
 app.use(cors({
     origin: function (origin, callback) {
         // By passing 'true' back, we dynamically allow whatever origin made the request.
@@ -545,46 +554,42 @@ app.get('/api/messages/:contactId', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Failed to load messages.' });
     }
 });
-// 3. Send a Message with an Attached Image
-app.post('/api/messages/upload', requireAuth, upload.single('file'), async (req, res) => {
+
+// 2. Send a Message (With Optional Image Attachment)
+app.post('/api/messages', requireAuth, (req, res, next) => {
+    // Catch multer errors gracefully
+    upload.single('attachment')(req, res, (err) => {
+        if (err) return res.status(400).json({ error: err.message });
+        next();
+    });
+}, async (req, res) => {
     const myId = req.user.id;
     const { receiver_id, message_text } = req.body;
 
     if (!receiver_id) {
         return res.status(400).json({ error: "Missing receiver." });
     }
+
+    // Require either text or an image
+    if (!message_text && !req.file) {
+        return res.status(400).json({ error: "Message text or an image is required." });
+    }
+
     if (message_text && message_text.length > 2000) {
         return res.status(400).json({ error: "Message exceeds the 2,000 character limit." });
     }
 
+    // req.file.path holds the securely generated Cloudinary URL
+    const attachmentUrl = req.file ? req.file.path : null;
+
     try {
-        let attachmentUrl = null;
-
-        // Stream file data securely directly to Cloudinary via server memory
-        if (req.file) {
-            const uploadFromBuffer = (reqFile) => {
-                return new Promise((resolve, reject) => {
-                    const cld_upload_stream = cloudinary.uploader.upload_stream(
-                        { folder: "sc2_chat_attachments" },
-                        (error, result) => {
-                            if (result) resolve(result);
-                            else reject(error);
-                        }
-                    );
-                    streamifier.createReadStream(reqFile.buffer).pipe(cld_upload_stream);
-                });
-            };
-            const result = await uploadFromBuffer(req.file);
-            attachmentUrl = result.secure_url;
-        }
-
-        // Save entry containing image link into Supabase
+        // Save to Database
         const { data: newMessage, error } = await supabase
             .from('messages')
             .insert([{
                 sender_id: myId,
                 receiver_id: receiver_id,
-                message_text: message_text || "",
+                message_text: message_text || "", // Fallback to empty string if image-only
                 attachment_url: attachmentUrl,
                 is_read: false
             }])
@@ -593,46 +598,7 @@ app.post('/api/messages/upload', requireAuth, upload.single('file'), async (req,
 
         if (error) throw error;
 
-        // Live WebSocket dispatch
-        const receiverSocketId = activeUsers.get(receiver_id);
-        if (receiverSocketId) {
-            io.to(receiverSocketId).emit('receive_message', newMessage);
-        }
-
-        res.status(201).json(newMessage);
-    } catch (error) {
-        console.error("Upload error details:", error);
-        res.status(500).json({ error: 'Failed to process file attachment.' });
-    }
-});
-// 2. Send a Message
-app.post('/api/messages', requireAuth, async (req, res) => {
-    const myId = req.user.id;
-    const { receiver_id, message_text } = req.body;
-
-    if (!receiver_id || !message_text) {
-        return res.status(400).json({ error: "Missing receiver or message text." });
-    }
-    // Backend Character Length Check
-    if (message_text.length > 2000) {
-        return res.status(400).json({ error: "Message exceeds the 2,000 character limit." });
-    }
-    try {
-        // Save to Database
-        const { data: newMessage, error } = await supabase
-            .from('messages')
-            .insert([{
-                sender_id: myId,
-                receiver_id: receiver_id,
-                message_text: message_text,
-                is_read: false
-            }])
-            .select()
-            .single();
-
-        if (error) throw error;
-
-        // 🚀 LIVE EMISSION: Check if the receiver is online and send it instantly!
+        // 🚀 LIVE EMISSION: Emit the message instantly via WebSockets!
         const receiverSocketId = activeUsers.get(receiver_id);
         if (receiverSocketId) {
             io.to(receiverSocketId).emit('receive_message', newMessage);
@@ -640,7 +606,7 @@ app.post('/api/messages', requireAuth, async (req, res) => {
 
         res.status(201).json(newMessage);
     } catch (err) {
-        console.error("Send Message Error:", err);
+        console.error("Message Send Error:", err);
         res.status(500).json({ error: 'Failed to send message.' });
     }
 });
