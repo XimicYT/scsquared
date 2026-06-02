@@ -497,7 +497,10 @@ app.post('/api/messages', requireAuth, async (req, res) => {
     if (!receiver_id || !message_text) {
         return res.status(400).json({ error: "Missing receiver or message text." });
     }
-
+    // Backend Character Length Check
+    if (message_text.length > 2000) {
+        return res.status(400).json({ error: "Message exceeds the 2,000 character limit." });
+    }
     try {
         // Save to Database
         const { data: newMessage, error } = await supabase
