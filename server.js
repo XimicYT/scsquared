@@ -2,6 +2,9 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+const streamifier = require('streamifier');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 const http = require('http');
@@ -59,7 +62,25 @@ io.on('connection', (socket) => {
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
+// Cloudinary configuration from environment variables
+cloudinary.config({ 
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME, 
+    api_key: process.env.CLOUDINARY_API_KEY, 
+    api_secret: process.env.CLOUDINARY_API_SECRET 
+});
 
+// Multer memory storage config with a strict 5MB limit
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MegaBytes
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Only image files are allowed.'));
+        }
+    }
+});
 app.use(cors({
     origin: function (origin, callback) {
         // By passing 'true' back, we dynamically allow whatever origin made the request.
@@ -524,7 +545,66 @@ app.get('/api/messages/:contactId', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Failed to load messages.' });
     }
 });
+// 3. Send a Message with an Attached Image
+app.post('/api/messages/upload', requireAuth, upload.single('file'), async (req, res) => {
+    const myId = req.user.id;
+    const { receiver_id, message_text } = req.body;
 
+    if (!receiver_id) {
+        return res.status(400).json({ error: "Missing receiver." });
+    }
+    if (message_text && message_text.length > 2000) {
+        return res.status(400).json({ error: "Message exceeds the 2,000 character limit." });
+    }
+
+    try {
+        let attachmentUrl = null;
+
+        // Stream file data securely directly to Cloudinary via server memory
+        if (req.file) {
+            const uploadFromBuffer = (reqFile) => {
+                return new Promise((resolve, reject) => {
+                    const cld_upload_stream = cloudinary.uploader.upload_stream(
+                        { folder: "sc2_chat_attachments" },
+                        (error, result) => {
+                            if (result) resolve(result);
+                            else reject(error);
+                        }
+                    );
+                    streamifier.createReadStream(reqFile.buffer).pipe(cld_upload_stream);
+                });
+            };
+            const result = await uploadFromBuffer(req.file);
+            attachmentUrl = result.secure_url;
+        }
+
+        // Save entry containing image link into Supabase
+        const { data: newMessage, error } = await supabase
+            .from('messages')
+            .insert([{
+                sender_id: myId,
+                receiver_id: receiver_id,
+                message_text: message_text || "",
+                attachment_url: attachmentUrl,
+                is_read: false
+            }])
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // Live WebSocket dispatch
+        const receiverSocketId = activeUsers.get(receiver_id);
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('receive_message', newMessage);
+        }
+
+        res.status(201).json(newMessage);
+    } catch (error) {
+        console.error("Upload error details:", error);
+        res.status(500).json({ error: 'Failed to process file attachment.' });
+    }
+});
 // 2. Send a Message
 app.post('/api/messages', requireAuth, async (req, res) => {
     const myId = req.user.id;
