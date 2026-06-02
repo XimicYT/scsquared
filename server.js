@@ -12,18 +12,18 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
 // --- Cloudinary Setup ---
 cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-// Configure Multer Storage to pipe directly to Cloudinary
 const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: {
-    folder: 'sc_chat_attachments',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'] // STRICTLY enforce images
-  }
+    cloudinary: cloudinary,
+    params: {
+        folder: 'sc_chat_attachments',
+        allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+        transformation: [{ width: 1000, crop: "limit", quality: "auto" }] // <-- ADD THIS
+    }
 });
 
 const upload = multer({
