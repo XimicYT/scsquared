@@ -942,7 +942,48 @@ app.get('/api/groups/:id/messages', requireAuth, async (req, res) => {
         res.status(500).json({ error: "Failed to fetch chat history." });
     }
 });
+// Send a message to a group chat
+app.post('/api/groups/:id/messages', messageLimiter, requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    const myId = req.user.id;
+    const { message_text } = req.body;
 
+    if (!message_text) return res.status(400).json({ error: "Message cannot be empty." });
+
+    try {
+        // Double check they are actually in the group
+        const { data: member } = await supabase
+            .from('group_members')
+            .select('status')
+            .eq('group_id', groupId)
+            .eq('user_id', myId)
+            .single();
+
+        if (!member || member.status !== 'joined') {
+            return res.status(403).json({ error: "You are not a member of this group." });
+        }
+
+        const { data: newMessage, error } = await supabase
+            .from('group_messages')
+            .insert([{
+                group_id: groupId,
+                sender_id: myId,
+                message_text: message_text
+            }])
+            .select(`id, message_text, attachment_url, created_at, sender_id, users(username)`)
+            .single();
+
+        if (error) throw error;
+
+        // Broadcast to everyone in the group room
+        io.to(`group_${groupId}`).emit('receive_group_message', newMessage);
+
+        res.status(201).json(newMessage);
+    } catch (err) {
+        console.error("Group Message Error:", err);
+        res.status(500).json({ error: 'Failed to send group message.' });
+    }
+});
 server.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
