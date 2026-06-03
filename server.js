@@ -494,7 +494,7 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
         // Step 2: Fetch last message AND reverse block status
         const contactsWithMessages = await Promise.all(baseContacts.map(async (c) => {
             const friendId = c.users.id;
-            
+
             // Fetch Last Message
             const { data: msgs } = await supabase
                 .from('messages')
@@ -665,6 +665,24 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
     const attachmentUrl = req.file ? req.file.path : null;
 
     try {
+        // 🛑 STRICT BLOCK CHECK: Ensure neither user has blocked the other
+        const { data: blockCheck, error: blockError } = await supabase
+            .from('contacts')
+            .select('user_id, contact_user_id, is_blocked')
+            .or(`and(user_id.eq.${myId},contact_user_id.eq.${receiver_id}),and(user_id.eq.${receiver_id},contact_user_id.eq.${myId})`)
+            .eq('is_blocked', true);
+
+        if (blockCheck && blockCheck.length > 0) {
+            // Determine who initiated the block
+            const iBlockedThem = blockCheck.some(b => b.user_id === myId);
+            if (iBlockedThem) {
+                return res.status(403).json({ error: "You have blocked this user. Unblock them to send messages." });
+            } else {
+                // Keep the error message standard for the person who was blocked
+                return res.status(403).json({ error: "Message failed to send." });
+            }
+        }
+
         // Save to Database
         const { data: newMessage, error } = await supabase
             .from('messages')
@@ -693,6 +711,199 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
     }
 });
 
+// ==========================================
+// 👥 GROUP CHATS API ENDPOINTS
+// ==========================================
+
+// 1. Fetch all groups the current user belongs to
+app.get('/api/groups', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    try {
+        // Fetch group memberships
+        const { data: memberships, error: memError } = await supabase
+            .from('group_members')
+            .select('group_id')
+            .eq('user_id', myId);
+
+        if (memError) throw memError;
+        if (!memberships || memberships.length === 0) return res.json({ groups: [] });
+
+        const groupIds = memberships.map(m => m.group_id);
+
+        // Fetch groups information
+        const { data: groups, error: groupError } = await supabase
+            .from('groups')
+            .select('id, name, created_at, created_by')
+            .in('id', groupIds);
+
+        if (groupError) throw groupError;
+
+        // Hydrate each group with member counts and last message details
+        const fullyHydratedGroups = await Promise.all(groups.map(async (group) => {
+            const { count } = await supabase
+                .from('group_members')
+                .select('*', { count: 'exact', head: true })
+                .eq('group_id', group.id);
+
+            const { data: lastMsg } = await supabase
+                .from('group_messages')
+                .select(`
+                    message_text, 
+                    created_at, 
+                    users ( username )
+                `)
+                .eq('group_id', group.id)
+                .order('created_at', { ascending: false })
+                .limit(1);
+
+            const msgNode = lastMsg && lastMsg[0];
+            return {
+                ...group,
+                member_count: count || 1,
+                last_message_text: msgNode ? msgNode.message_text : "No messages yet.",
+                last_message_time: msgNode ? msgNode.created_at : group.created_at,
+                last_message_sender: msgNode && msgNode.users ? msgNode.users.username : null
+            };
+        }));
+
+        // Sort groups by last message recency
+        fullyHydratedGroups.sort((a, b) => new Date(b.last_message_time) - new Date(a.last_message_time));
+
+        res.json({ groups: fullyHydratedGroups });
+    } catch (err) {
+        console.error("Fetch Groups Error:", err);
+        res.status(500).json({ error: "Failed to fetch groups." });
+    }
+});
+
+// 2. Create a new group and attach initial members
+app.post('/api/groups', requireAuth, async (req, res) => {
+    let { name, memberIds } = req.body;
+    const myId = req.user.id;
+
+    if (!name || name.trim() === "") {
+        return res.status(400).json({ error: "Group name is required." });
+    }
+
+    try {
+        const sanitizedName = sanitizeInput(name);
+
+        // Insert group core object
+        const { data: group, error: groupErr } = await supabase
+            .from('groups')
+            .insert([{ name: sanitizedName, created_by: myId }])
+            .select()
+            .single();
+
+        if (groupErr) throw groupErr;
+
+        // Prepare relational membership entries
+        const targetMembers = [{ group_id: group.id, user_id: myId }];
+        if (Array.isArray(memberIds)) {
+            memberIds.forEach(id => {
+                if (id !== myId) targetMembers.push({ group_id: group.id, user_id: id });
+            });
+        }
+
+        const { error: memberErr } = await supabase
+            .from('group_members')
+            .insert(targetMembers);
+
+        if (memberErr) throw memberErr;
+
+        res.status(201).json({ ...group, member_count: targetMembers.length, last_message_text: "Group created." });
+    } catch (err) {
+        console.error("Create Group Error:", err);
+        res.status(500).json({ error: "Failed to create group." });
+    }
+});
+
+// 3. Fetch specific group chat message history
+app.get('/api/groups/:id/messages', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    try {
+        const { data: messages, error } = await supabase
+            .from('group_messages')
+            .select(`
+                id,
+                group_id,
+                sender_id,
+                message_text,
+                attachment_url,
+                created_at,
+                users ( id, username, custom_color )
+            `)
+            .eq('group_id', groupId)
+            .order('created_at', { ascending: true });
+
+        if (error) throw error;
+        res.json({ messages: messages || [] });
+    } catch (err) {
+        console.error("Fetch Group Messages Error:", err);
+        res.status(500).json({ error: "Failed to load message history." });
+    }
+});
+
+// 4. Send group message (with multer attachment fallback processing)
+app.post('/api/groups/:id/messages', requireAuth, upload.single('attachment'), messageLimiter, async (req, res) => {
+    const groupId = req.params.id;
+    let { message_text } = req.body;
+    const myId = req.user.id;
+    const attachmentUrl = req.file ? req.file.path : null;
+
+    if ((!message_text || message_text.trim() === "") && !attachmentUrl) {
+        return res.status(400).json({ error: "Cannot send an empty message." });
+    }
+
+    try {
+        const { data: newMessage, error } = await supabase
+            .from('group_messages')
+            .insert([{
+                group_id: groupId,
+                sender_id: myId,
+                message_text: sanitizeInput(message_text),
+                attachment_url: attachmentUrl
+            }])
+            .select(`
+                id,
+                group_id,
+                sender_id,
+                message_text,
+                attachment_url,
+                created_at,
+                users ( id, username, custom_color )
+            `)
+            .single();
+
+        if (error) throw error;
+
+        // Broadcast live to all users connected to this group's dynamic WebSocket room
+        io.to(`group_${groupId}`).emit('receive_group_message', newMessage);
+
+        res.status(201).json(newMessage);
+    } catch (err) {
+        console.error("Send Group Message Error:", err);
+        res.status(500).json({ error: "Failed to dispatch message." });
+    }
+});
+
+// Update the primary Socket.io connection pipeline to listen for group synchronization events:
+io.on('connection', (socket) => {
+    activeUsers.set(socket.userId, socket.id);
+
+    // Dynamic subscription handler to join room channels securely
+    socket.on('join_group_room', (groupId) => {
+        socket.join(`group_${groupId}`);
+    });
+
+    socket.on('leave_group_room', (groupId) => {
+        socket.leave(`group_${groupId}`);
+    });
+
+    socket.on('disconnect', () => {
+        activeUsers.delete(socket.userId);
+    });
+});
 
 server.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
