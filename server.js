@@ -710,71 +710,40 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
         res.status(500).json({ error: 'Failed to send message.' });
     }
 });
-
 // ==========================================
 // 👥 GROUP CHATS API ENDPOINTS
 // ==========================================
 
-// 1. Fetch groups the current user has joined
+// 1. GET All Groups for the Logged-in User
 app.get('/api/groups', requireAuth, async (req, res) => {
     const myId = req.user.id;
+
     try {
-        // Find group IDs where current user is a joined member
-        const { data: memberships, error: memError } = await supabase
+        const { data: memberships, error } = await supabase
             .from('group_members')
-            .select('group_id')
-            .eq('user_id', myId)
-            .eq('status', 'joined');
-
-        if (memError) throw memError;
-        if (!memberships || memberships.length === 0) return res.json({ groups: [] });
-
-        const groupIds = memberships.map(m => m.group_id);
-
-        // Fetch details for those groups along with their current member counts
-        const { data: groups, error: groupError } = await supabase
-            .from('groups')
             .select(`
-                id, name, description, created_by, created_at,
-                group_members(count)
+                group_id,
+                groups (
+                    id,
+                    name,
+                    description,
+                    created_at
+                )
             `)
-            .in('id', groupIds)
-            .order('created_at', { ascending: false });
+            .eq('user_id', myId);
 
-        if (groupError) throw groupError;
+        if (error) throw error;
 
-        // Fetch the last message preview for each group
-        const groupsWithPreviews = await Promise.all(groups.map(async (g) => {
-            const { data: lastMsg } = await supabase
-                .from('group_messages')
-                .select('message_text, users(username)')
-                .eq('group_id', g.id)
-                .order('created_at', { ascending: false })
-                .limit(1)
-                .single();
+        const groups = memberships.map(m => m.groups);
+        res.status(200).json(groups);
 
-            let previewText = "No messages yet. Say hello!";
-            if (lastMsg) {
-                previewText = `${lastMsg.users?.username || 'Someone'}: ${lastMsg.message_text}`;
-            }
-
-            return {
-                id: g.id,
-                name: g.name,
-                description: g.description,
-                member_count: g.group_members[0]?.count || 0,
-                last_message: previewText
-            };
-        }));
-
-        res.json({ groups: groupsWithPreviews });
     } catch (err) {
-        console.error("Fetch Groups Error:", err);
-        res.status(500).json({ error: "Failed to retrieve group conversations." });
+        console.error("Error fetching groups:", err);
+        res.status(500).json({ error: "Could not fetch groups." });
     }
 });
 
-// 2. Fetch pending group invites for the user (never expires)
+// 2. Fetch pending group invites for the user
 app.get('/api/groups/invites', requireAuth, async (req, res) => {
     const myId = req.user.id;
     try {
@@ -805,23 +774,20 @@ app.get('/api/groups/invites', requireAuth, async (req, res) => {
     }
 });
 
-// 3. Create a brand new group chat (requires Title and Description)
+// 3. Create a brand new group chat (Supports bulk adding members)
 app.post('/api/groups', requireAuth, async (req, res) => {
     const myId = req.user.id;
-    let { name, description } = req.body;
+    let { name, description, members } = req.body;
 
     name = sanitizeInput(name);
-    description = sanitizeInput(description);
+    description = description ? sanitizeInput(description) : "A new group chat";
 
-    if (!name || name.length < 3 || name.length > 50) {
-        return res.status(400).json({ error: "Please enter a group title between 3 and 50 characters." });
-    }
-    if (!description || description.length < 5 || description.length > 200) {
-        return res.status(400).json({ error: "Please enter a clear description between 5 and 200 characters." });
+    if (!name || name.length < 1 || name.length > 50) {
+        return res.status(400).json({ error: "Please enter a group title between 1 and 50 characters." });
     }
 
     try {
-        // Insert group metadata
+        // Step 1: Insert group metadata
         const { data: group, error: groupError } = await supabase
             .from('groups')
             .insert([{ name, description, created_by: myId }])
@@ -830,12 +796,33 @@ app.post('/api/groups', requireAuth, async (req, res) => {
 
         if (groupError) throw groupError;
 
-        // Instantly join the creator as a full member
+        // Step 2: Prepare member insertions
+        let memberIds = Array.isArray(members) ? members : [];
+        if (!memberIds.includes(myId)) memberIds.push(myId);
+        memberIds = [...new Set(memberIds)];
+
+        const membersToInsert = memberIds.map(id => ({
+            group_id: group.id,
+            user_id: id,
+            status: 'joined'
+        }));
+
+        // Step 3: Insert all members at once
         const { error: memberError } = await supabase
             .from('group_members')
-            .insert([{ group_id: group.id, user_id: myId, status: 'joined' }]);
+            .insert(membersToInsert);
 
         if (memberError) throw memberError;
+
+        // Emit live notification to online added members
+        memberIds.forEach(targetId => {
+            if (targetId !== myId) {
+                const receiverSocketId = activeUsers.get(targetId);
+                if (receiverSocketId) {
+                    io.to(receiverSocketId).emit('group_invite_received');
+                }
+            }
+        });
 
         res.status(201).json({ success: true, group });
     } catch (err) {
@@ -851,7 +838,6 @@ app.post('/api/groups/:id/invite', requireAuth, async (req, res) => {
     user_tag = sanitizeInput(user_tag);
 
     try {
-        // Resolve user via unique chat_id string
         const { data: targetUser, error: userError } = await supabase
             .from('users')
             .select('id, username')
@@ -862,7 +848,6 @@ app.post('/api/groups/:id/invite', requireAuth, async (req, res) => {
             return res.status(404).json({ error: "No user found with that Tag ID." });
         }
 
-        // Check if user is already listed in the group
         const { data: existing, error: checkError } = await supabase
             .from('group_members')
             .select('status')
@@ -875,14 +860,12 @@ app.post('/api/groups/:id/invite', requireAuth, async (req, res) => {
             if (existing.status === 'invited') return res.status(400).json({ error: "An invitation has already been sent to this user." });
         }
 
-        // Place invitation entry into members table
         const { error: inviteError } = await supabase
             .from('group_members')
             .insert([{ group_id: groupId, user_id: targetUser.id, status: 'invited' }]);
 
         if (inviteError) throw inviteError;
 
-        // Emit real-time live notification via websockets if target user is online
         const receiverSocketId = activeUsers.get(targetUser.id);
         if (receiverSocketId) {
             io.to(receiverSocketId).emit('group_invite_received');
@@ -958,7 +941,7 @@ app.get('/api/groups/:id/messages', requireAuth, async (req, res) => {
     }
 });
 
-// 8. Broadcast group chat live messages via WebSockets (Socket.io addition)
+// 8. Broadcast group chat live messages via WebSockets
 io.on('connection', (socket) => {
     socket.on('join_group_room', (groupId) => {
         socket.join(`group_${groupId}`);
@@ -967,64 +950,6 @@ io.on('connection', (socket) => {
     socket.on('leave_group_room', (groupId) => {
         socket.leave(`group_${groupId}`);
     });
-});
-
-// 3. Create a brand new group chat (Supports bulk adding members)
-app.post('/api/groups', requireAuth, async (req, res) => {
-    const myId = req.user.id;
-    let { name, description, members } = req.body; // <-- Added members array
-
-    name = sanitizeInput(name);
-    description = description ? sanitizeInput(description) : "A new group chat";
-
-    if (!name || name.length < 1 || name.length > 50) {
-        return res.status(400).json({ error: "Please enter a group title between 1 and 50 characters." });
-    }
-
-    try {
-        // Step 1: Insert group metadata
-        const { data: group, error: groupError } = await supabase
-            .from('groups')
-            .insert([{ name, description, created_by: myId }])
-            .select()
-            .single();
-
-        if (groupError) throw groupError;
-
-        // Step 2: Prepare member insertions
-        // Ensure the creator is in the list, and remove duplicates
-        let memberIds = Array.isArray(members) ? members : [];
-        if (!memberIds.includes(myId)) memberIds.push(myId);
-        memberIds = [...new Set(memberIds)];
-
-        const membersToInsert = memberIds.map(id => ({
-            group_id: group.id,
-            user_id: id,
-            status: 'joined' // Instantly join them based on frontend flow
-        }));
-
-        // Step 3: Insert all members at once
-        const { error: memberError } = await supabase
-            .from('group_members')
-            .insert(membersToInsert);
-
-        if (memberError) throw memberError;
-
-        // Emit live notification to online added members
-        memberIds.forEach(targetId => {
-            if (targetId !== myId) {
-                const receiverSocketId = activeUsers.get(targetId);
-                if (receiverSocketId) {
-                    io.to(receiverSocketId).emit('group_invite_received');
-                }
-            }
-        });
-
-        res.status(201).json({ success: true, group });
-    } catch (err) {
-        console.error("Group Creation Error:", err);
-        res.status(500).json({ error: "Could not create group. Try again later." });
-    }
 });
 
 server.listen(PORT, () => {
