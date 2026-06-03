@@ -969,31 +969,61 @@ io.on('connection', (socket) => {
     });
 });
 
-// Send new group message route
-app.post('/api/groups/:id/messages', requireAuth, async (req, res) => {
-    const groupId = req.params.id;
+// 3. Create a brand new group chat (Supports bulk adding members)
+app.post('/api/groups', requireAuth, async (req, res) => {
     const myId = req.user.id;
-    let { message_text } = req.body;
-    message_text = sanitizeInput(message_text);
+    let { name, description, members } = req.body; // <-- Added members array
 
-    if (!message_text) return res.status(400).json({ error: "Cannot send an empty message." });
+    name = sanitizeInput(name);
+    description = description ? sanitizeInput(description) : "A new group chat";
+
+    if (!name || name.length < 1 || name.length > 50) {
+        return res.status(400).json({ error: "Please enter a group title between 1 and 50 characters." });
+    }
 
     try {
-        const { data: msg, error } = await supabase
-            .from('group_messages')
-            .insert([{ group_id: groupId, sender_id: myId, message_text }])
-            .select(`id, message_text, attachment_url, created_at, sender_id, users(username)`)
+        // Step 1: Insert group metadata
+        const { data: group, error: groupError } = await supabase
+            .from('groups')
+            .insert([{ name, description, created_by: myId }])
+            .select()
             .single();
 
-        if (error) throw error;
+        if (groupError) throw groupError;
 
-        // Blast to everyone currently reading inside the group
-        io.to(`group_${groupId}`).emit('new_group_message', msg);
+        // Step 2: Prepare member insertions
+        // Ensure the creator is in the list, and remove duplicates
+        let memberIds = Array.isArray(members) ? members : [];
+        if (!memberIds.includes(myId)) memberIds.push(myId);
+        memberIds = [...new Set(memberIds)];
 
-        res.status(201).json(msg);
+        const membersToInsert = memberIds.map(id => ({
+            group_id: group.id,
+            user_id: id,
+            status: 'joined' // Instantly join them based on frontend flow
+        }));
+
+        // Step 3: Insert all members at once
+        const { error: memberError } = await supabase
+            .from('group_members')
+            .insert(membersToInsert);
+
+        if (memberError) throw memberError;
+
+        // Emit live notification to online added members
+        memberIds.forEach(targetId => {
+            if (targetId !== myId) {
+                const receiverSocketId = activeUsers.get(targetId);
+                if (receiverSocketId) {
+                    io.to(receiverSocketId).emit('group_invite_received');
+                }
+            }
+        });
+
+        res.status(201).json({ success: true, group });
     } catch (err) {
-        console.error("Send Group Msg Error:", err);
-        res.status(500).json({ error: "Failed to dispatch message." });
+        console.error("Group Creation Error:", err);
+        res.status(500).json({ error: "Could not create group. Try again later." });
     }
 });
 
