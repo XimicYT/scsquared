@@ -535,7 +535,54 @@ app.delete('/api/contacts/:contact_id', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error while removing contact.' });
     }
 });
+// --- BLOCK / UNBLOCK CONTACT ---
+app.patch('/api/contacts/:id/block', async (req, res) => {
+    const myId = req.cookies.sc_token ? jwt.verify(req.cookies.sc_token, process.env.JWT_SECRET).id : null;
+    const contactId = req.params.id;
+    const { is_blocked } = req.body;
 
+    if (!myId) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+        const { data, error } = await supabase
+            .from('contacts')
+            .update({ is_blocked: is_blocked })
+            .eq('user_id', myId)
+            .eq('contact_user_id', contactId)
+            .select()
+            .single();
+
+        if (error) throw error;
+        res.json({ success: true, contact: data });
+    } catch (err) {
+        console.error("Block Error:", err);
+        res.status(500).json({ error: "Could not update block status." });
+    }
+});
+
+// --- REMOVE CONTACT ---
+app.delete('/api/contacts/:id', async (req, res) => {
+    const myId = req.cookies.sc_token ? jwt.verify(req.cookies.sc_token, process.env.JWT_SECRET).id : null;
+    const contactId = req.params.id;
+
+    if (!myId) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+        // Delete from my contacts
+        const { error: err1 } = await supabase
+            .from('contacts')
+            .delete()
+            .eq('user_id', myId)
+            .eq('contact_user_id', contactId);
+            
+        if (err1) throw err1;
+
+        res.json({ success: true, message: "Contact removed" });
+    } catch (err) {
+        console.error("Remove Error:", err);
+        res.status(500).json({ error: "Could not remove contact." });
+    }
+});
 // 4. Toggle Favorite
 app.patch('/api/contacts/favorite', requireAuth, async (req, res) => {
     const myId = req.user.id;
