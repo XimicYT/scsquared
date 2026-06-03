@@ -478,11 +478,12 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
 app.get('/api/contacts', requireAuth, async (req, res) => {
     const myId = req.user.id;
     try {
-        // Step 1: Get the list of contacts
+        // Step 1: Get the list of contacts (ADDED is_blocked)
         const { data: contacts, error } = await supabase
             .from('contacts')
             .select(`
                 is_favorite,
+                is_blocked, 
                 users!contacts_contact_user_id_fkey (id, username, chat_id)
             `)
             .eq('user_id', myId);
@@ -490,8 +491,7 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
         if (error) throw error;
         const baseContacts = (contacts || []).filter(c => c.users !== null);
 
-        // Step 2: Fetch the last message for each contact in parallel ON THE SERVER.
-        // This solves the frontend N+1 problem by handling the load directly next to the DB.
+        // Step 2: Fetch the last message
         const contactsWithMessages = await Promise.all(baseContacts.map(async (c) => {
             const friendId = c.users.id;
             const { data: msgs } = await supabase
@@ -499,13 +499,14 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                 .select('message_text, sender_id')
                 .or(`and(sender_id.eq.${myId},receiver_id.eq.${friendId}),and(sender_id.eq.${friendId},receiver_id.eq.${myId})`)
                 .order('created_at', { ascending: false })
-                .limit(1); // Only grab the very last message
+                .limit(1);
 
             const lastMsg = msgs && msgs.length > 0 ? msgs[0] : null;
 
             return {
                 ...c.users,
                 is_favorite: c.is_favorite,
+                is_blocked: c.is_blocked, // <-- ADDED THIS LINE SO FRONTEND KNOWS
                 last_message: lastMsg ? lastMsg.message_text : "No messages yet",
                 last_message_sender_id: lastMsg ? lastMsg.sender_id : null
             };
@@ -574,7 +575,7 @@ app.delete('/api/contacts/:id', async (req, res) => {
             .delete()
             .eq('user_id', myId)
             .eq('contact_user_id', contactId);
-            
+
         if (err1) throw err1;
 
         res.json({ success: true, message: "Contact removed" });
