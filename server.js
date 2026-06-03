@@ -474,11 +474,11 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
     }
 });
 
-// 2. Get All Contacts (⚡ FIX 2: N+1 Query Fix)
+// 2. Get All Contacts
 app.get('/api/contacts', requireAuth, async (req, res) => {
     const myId = req.user.id;
     try {
-        // Step 1: Get the list of contacts (ADDED is_blocked)
+        // Step 1: Get the list of contacts (Make sure is_blocked is included!)
         const { data: contacts, error } = await supabase
             .from('contacts')
             .select(`
@@ -491,22 +491,31 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
         if (error) throw error;
         const baseContacts = (contacts || []).filter(c => c.users !== null);
 
-        // Step 2: Fetch the last message
+        // Step 2: Fetch last message AND reverse block status
         const contactsWithMessages = await Promise.all(baseContacts.map(async (c) => {
             const friendId = c.users.id;
+            
+            // Fetch Last Message
             const { data: msgs } = await supabase
                 .from('messages')
                 .select('message_text, sender_id')
                 .or(`and(sender_id.eq.${myId},receiver_id.eq.${friendId}),and(sender_id.eq.${friendId},receiver_id.eq.${myId})`)
                 .order('created_at', { ascending: false })
                 .limit(1);
-
             const lastMsg = msgs && msgs.length > 0 ? msgs[0] : null;
+
+            // NEW: Fetch Reverse Contact (Did they block me?)
+            const { data: reverseContact } = await supabase
+                .from('contacts')
+                .select('is_blocked')
+                .match({ user_id: friendId, contact_user_id: myId })
+                .single();
 
             return {
                 ...c.users,
                 is_favorite: c.is_favorite,
-                is_blocked: c.is_blocked, // <-- ADDED THIS LINE SO FRONTEND KNOWS
+                is_blocked: c.is_blocked, // Did I block them?
+                has_blocked_me: reverseContact ? reverseContact.is_blocked : false, // Did they block me?
                 last_message: lastMsg ? lastMsg.message_text : "No messages yet",
                 last_message_sender_id: lastMsg ? lastMsg.sender_id : null
             };
@@ -518,7 +527,6 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error while fetching contacts.' });
     }
 });
-
 // 3. Remove Contact (Mutual Deletion - FIX)
 app.delete('/api/contacts/:contact_id', requireAuth, async (req, res) => {
     const myId = req.user.id;
