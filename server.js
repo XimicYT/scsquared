@@ -715,183 +715,251 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
 // 👥 GROUP CHATS API ENDPOINTS
 // ==========================================
 
-// 1. Fetch all groups the current user belongs to
+// 1. Fetch groups the current user has joined
 app.get('/api/groups', requireAuth, async (req, res) => {
     const myId = req.user.id;
     try {
-        // Fetch group memberships
+        // Find group IDs where current user is a joined member
         const { data: memberships, error: memError } = await supabase
             .from('group_members')
             .select('group_id')
-            .eq('user_id', myId);
+            .eq('user_id', myId)
+            .eq('status', 'joined');
 
         if (memError) throw memError;
         if (!memberships || memberships.length === 0) return res.json({ groups: [] });
 
         const groupIds = memberships.map(m => m.group_id);
 
-        // Fetch groups information
+        // Fetch details for those groups along with their current member counts
         const { data: groups, error: groupError } = await supabase
             .from('groups')
-            .select('id, name, created_at, created_by')
-            .in('id', groupIds);
+            .select(`
+                id, name, description, created_by, created_at,
+                group_members(count)
+            `)
+            .in('id', groupIds)
+            .order('created_at', { ascending: false });
 
         if (groupError) throw groupError;
 
-        // Hydrate each group with member counts and last message details
-        const fullyHydratedGroups = await Promise.all(groups.map(async (group) => {
-            const { count } = await supabase
-                .from('group_members')
-                .select('*', { count: 'exact', head: true })
-                .eq('group_id', group.id);
-
+        // Fetch the last message preview for each group
+        const groupsWithPreviews = await Promise.all(groups.map(async (g) => {
             const { data: lastMsg } = await supabase
                 .from('group_messages')
-                .select(`
-                    message_text, 
-                    created_at, 
-                    users ( username )
-                `)
-                .eq('group_id', group.id)
+                .select('message_text, users(username)')
+                .eq('group_id', g.id)
                 .order('created_at', { ascending: false })
-                .limit(1);
+                .limit(1)
+                .single();
 
-            const msgNode = lastMsg && lastMsg[0];
+            let previewText = "No messages yet. Say hello!";
+            if (lastMsg) {
+                previewText = `${lastMsg.users?.username || 'Someone'}: ${lastMsg.message_text}`;
+            }
+
             return {
-                ...group,
-                member_count: count || 1,
-                last_message_text: msgNode ? msgNode.message_text : "No messages yet.",
-                last_message_time: msgNode ? msgNode.created_at : group.created_at,
-                last_message_sender: msgNode && msgNode.users ? msgNode.users.username : null
+                id: g.id,
+                name: g.name,
+                description: g.description,
+                member_count: g.group_members[0]?.count || 0,
+                last_message: previewText
             };
         }));
 
-        // Sort groups by last message recency
-        fullyHydratedGroups.sort((a, b) => new Date(b.last_message_time) - new Date(a.last_message_time));
-
-        res.json({ groups: fullyHydratedGroups });
+        res.json({ groups: groupsWithPreviews });
     } catch (err) {
         console.error("Fetch Groups Error:", err);
-        res.status(500).json({ error: "Failed to fetch groups." });
+        res.status(500).json({ error: "Failed to retrieve group conversations." });
     }
 });
 
-// 2. Create a new group and attach initial members
-app.post('/api/groups', requireAuth, async (req, res) => {
-    let { name, memberIds } = req.body;
+// 2. Fetch pending group invites for the user (never expires)
+app.get('/api/groups/invites', requireAuth, async (req, res) => {
     const myId = req.user.id;
+    try {
+        const { data: invites, error } = await supabase
+            .from('group_members')
+            .select(`
+                group_id,
+                groups(id, name, description, created_at, users!groups_created_by_fkey(username))
+            `)
+            .eq('user_id', myId)
+            .eq('status', 'invited');
 
-    if (!name || name.trim() === "") {
-        return res.status(400).json({ error: "Group name is required." });
+        if (error) throw error;
+
+        const formattedInvites = (invites || [])
+            .filter(i => i.groups !== null)
+            .map(i => ({
+                id: i.groups.id,
+                name: i.groups.name,
+                description: i.groups.description,
+                invited_by: i.groups.users?.username || "Unknown"
+            }));
+
+        res.json({ invites: formattedInvites });
+    } catch (err) {
+        console.error("Fetch Invites Error:", err);
+        res.status(500).json({ error: "Failed to load pending invitations." });
+    }
+});
+
+// 3. Create a brand new group chat (requires Title and Description)
+app.post('/api/groups', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    let { name, description } = req.body;
+
+    name = sanitizeInput(name);
+    description = sanitizeInput(description);
+
+    if (!name || name.length < 3 || name.length > 50) {
+        return res.status(400).json({ error: "Please enter a group title between 3 and 50 characters." });
+    }
+    if (!description || description.length < 5 || description.length > 200) {
+        return res.status(400).json({ error: "Please enter a clear description between 5 and 200 characters." });
     }
 
     try {
-        const sanitizedName = sanitizeInput(name);
-
-        // Insert group core object
-        const { data: group, error: groupErr } = await supabase
+        // Insert group metadata
+        const { data: group, error: groupError } = await supabase
             .from('groups')
-            .insert([{ name: sanitizedName, created_by: myId }])
+            .insert([{ name, description, created_by: myId }])
             .select()
             .single();
 
-        if (groupErr) throw groupErr;
+        if (groupError) throw groupError;
 
-        // Prepare relational membership entries
-        const targetMembers = [{ group_id: group.id, user_id: myId }];
-        if (Array.isArray(memberIds)) {
-            memberIds.forEach(id => {
-                if (id !== myId) targetMembers.push({ group_id: group.id, user_id: id });
-            });
-        }
-
-        const { error: memberErr } = await supabase
+        // Instantly join the creator as a full member
+        const { error: memberError } = await supabase
             .from('group_members')
-            .insert(targetMembers);
+            .insert([{ group_id: group.id, user_id: myId, status: 'joined' }]);
 
-        if (memberErr) throw memberErr;
+        if (memberError) throw memberError;
 
-        res.status(201).json({ ...group, member_count: targetMembers.length, last_message_text: "Group created." });
+        res.status(201).json({ success: true, group });
     } catch (err) {
-        console.error("Create Group Error:", err);
-        res.status(500).json({ error: "Failed to create group." });
+        console.error("Group Creation Error:", err);
+        res.status(500).json({ error: "Could not create group. Try again later." });
     }
 });
 
-// 3. Fetch specific group chat message history
+// 4. Invite a user to an existing group by their unique chat_id (User Tag)
+app.post('/api/groups/:id/invite', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    let { user_tag } = req.body;
+    user_tag = sanitizeInput(user_tag);
+
+    try {
+        // Resolve user via unique chat_id string
+        const { data: targetUser, error: userError } = await supabase
+            .from('users')
+            .select('id, username')
+            .eq('chat_id', user_tag)
+            .single();
+
+        if (userError || !targetUser) {
+            return res.status(404).json({ error: "No user found with that Tag ID." });
+        }
+
+        // Check if user is already listed in the group
+        const { data: existing, error: checkError } = await supabase
+            .from('group_members')
+            .select('status')
+            .eq('group_id', groupId)
+            .eq('user_id', targetUser.id)
+            .single();
+
+        if (existing) {
+            if (existing.status === 'joined') return res.status(400).json({ error: "User is already a member of this group." });
+            if (existing.status === 'invited') return res.status(400).json({ error: "An invitation has already been sent to this user." });
+        }
+
+        // Place invitation entry into members table
+        const { error: inviteError } = await supabase
+            .from('group_members')
+            .insert([{ group_id: groupId, user_id: targetUser.id, status: 'invited' }]);
+
+        if (inviteError) throw inviteError;
+
+        // Emit real-time live notification via websockets if target user is online
+        const receiverSocketId = activeUsers.get(targetUser.id);
+        if (receiverSocketId) {
+            io.to(receiverSocketId).emit('group_invite_received');
+        }
+
+        res.json({ success: true, message: `Successfully invited ${targetUser.username}!` });
+    } catch (err) {
+        console.error("Invite Handler Error:", err);
+        res.status(500).json({ error: "Failed to process invitation." });
+    }
+});
+
+// 5. Accept a persistent group invitation
+app.post('/api/groups/:id/accept', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    const myId = req.user.id;
+
+    try {
+        const { error } = await supabase
+            .from('group_members')
+            .update({ status: 'joined', joined_at: new Date() })
+            .eq('group_id', groupId)
+            .eq('user_id', myId)
+            .eq('status', 'invited');
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Accept Invitation Error:", err);
+        res.status(500).json({ error: "Could not accept the invitation." });
+    }
+});
+
+// 6. Decline/Delete a group invitation
+app.post('/api/groups/:id/decline', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    const myId = req.user.id;
+
+    try {
+        const { error } = await supabase
+            .from('group_members')
+            .delete()
+            .eq('group_id', groupId)
+            .eq('user_id', myId)
+            .eq('status', 'invited');
+
+        if (error) throw error;
+        res.json({ success: true });
+    } catch (err) {
+        console.error("Decline Invitation Error:", err);
+        res.status(500).json({ error: "Could not remove invitation." });
+    }
+});
+
+// 7. Get message history for a group chat
 app.get('/api/groups/:id/messages', requireAuth, async (req, res) => {
     const groupId = req.params.id;
     try {
         const { data: messages, error } = await supabase
             .from('group_messages')
             .select(`
-                id,
-                group_id,
-                sender_id,
-                message_text,
-                attachment_url,
-                created_at,
-                users ( id, username, custom_color )
+                id, message_text, attachment_url, created_at, sender_id,
+                users(username)
             `)
             .eq('group_id', groupId)
             .order('created_at', { ascending: true });
 
         if (error) throw error;
-        res.json({ messages: messages || [] });
+        res.json({ messages });
     } catch (err) {
-        console.error("Fetch Group Messages Error:", err);
-        res.status(500).json({ error: "Failed to load message history." });
+        console.error("Group Messages Error:", err);
+        res.status(500).json({ error: "Failed to fetch chat history." });
     }
 });
 
-// 4. Send group message (with multer attachment fallback processing)
-app.post('/api/groups/:id/messages', requireAuth, upload.single('attachment'), messageLimiter, async (req, res) => {
-    const groupId = req.params.id;
-    let { message_text } = req.body;
-    const myId = req.user.id;
-    const attachmentUrl = req.file ? req.file.path : null;
-
-    if ((!message_text || message_text.trim() === "") && !attachmentUrl) {
-        return res.status(400).json({ error: "Cannot send an empty message." });
-    }
-
-    try {
-        const { data: newMessage, error } = await supabase
-            .from('group_messages')
-            .insert([{
-                group_id: groupId,
-                sender_id: myId,
-                message_text: sanitizeInput(message_text),
-                attachment_url: attachmentUrl
-            }])
-            .select(`
-                id,
-                group_id,
-                sender_id,
-                message_text,
-                attachment_url,
-                created_at,
-                users ( id, username, custom_color )
-            `)
-            .single();
-
-        if (error) throw error;
-
-        // Broadcast live to all users connected to this group's dynamic WebSocket room
-        io.to(`group_${groupId}`).emit('receive_group_message', newMessage);
-
-        res.status(201).json(newMessage);
-    } catch (err) {
-        console.error("Send Group Message Error:", err);
-        res.status(500).json({ error: "Failed to dispatch message." });
-    }
-});
-
-// Update the primary Socket.io connection pipeline to listen for group synchronization events:
+// 8. Broadcast group chat live messages via WebSockets (Socket.io addition)
 io.on('connection', (socket) => {
-    activeUsers.set(socket.userId, socket.id);
-
-    // Dynamic subscription handler to join room channels securely
     socket.on('join_group_room', (groupId) => {
         socket.join(`group_${groupId}`);
     });
@@ -899,10 +967,34 @@ io.on('connection', (socket) => {
     socket.on('leave_group_room', (groupId) => {
         socket.leave(`group_${groupId}`);
     });
+});
 
-    socket.on('disconnect', () => {
-        activeUsers.delete(socket.userId);
-    });
+// Send new group message route
+app.post('/api/groups/:id/messages', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    const myId = req.user.id;
+    let { message_text } = req.body;
+    message_text = sanitizeInput(message_text);
+
+    if (!message_text) return res.status(400).json({ error: "Cannot send an empty message." });
+
+    try {
+        const { data: msg, error } = await supabase
+            .from('group_messages')
+            .insert([{ group_id: groupId, sender_id: myId, message_text }])
+            .select(`id, message_text, attachment_url, created_at, sender_id, users(username)`)
+            .single();
+
+        if (error) throw error;
+
+        // Blast to everyone currently reading inside the group
+        io.to(`group_${groupId}`).emit('new_group_message', msg);
+
+        res.status(201).json(msg);
+    } catch (err) {
+        console.error("Send Group Msg Error:", err);
+        res.status(500).json({ error: "Failed to dispatch message." });
+    }
 });
 
 server.listen(PORT, () => {
