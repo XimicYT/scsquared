@@ -102,12 +102,14 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
-    // 🔒 We no longer wait for the client to tell us who they are. We KNOW who they are.
     activeUsers.set(socket.userId, socket.id);
-
-    // ⚡ FIX 2: O(1) Disconnect! No more loops.
-    socket.on('disconnect', () => {
+    socket.on('join_group_room', (groupId) => {
+        socket.join(`group_${groupId}`);
+    }); socket.on('leave_group_room', (groupId) => {
+        socket.leave(`group_${groupId}`);
+    }); socket.on('disconnect', () => {
         activeUsers.delete(socket.userId);
+
     });
 });
 
@@ -939,17 +941,6 @@ app.get('/api/groups/:id/messages', requireAuth, async (req, res) => {
         console.error("Group Messages Error:", err);
         res.status(500).json({ error: "Failed to fetch chat history." });
     }
-});
-
-// 8. Broadcast group chat live messages via WebSockets
-io.on('connection', (socket) => {
-    socket.on('join_group_room', (groupId) => {
-        socket.join(`group_${groupId}`);
-    });
-
-    socket.on('leave_group_room', (groupId) => {
-        socket.leave(`group_${groupId}`);
-    });
 });
 
 server.listen(PORT, () => {
