@@ -64,8 +64,13 @@ const upload = multer({
     }
 });
 const app = express();
+
+// --- ADD THIS LINE ---
+// Tells Express to trust the 1st proxy (Render) and use the real user IP for rate limiting
+app.set('trust proxy', 1);
+
 const PORT = process.env.PORT || 10000;
-const server = http.createServer(app);
+const server = http.createServer(app);;
 const io = new Server(server, {
     cors: {
         origin: true,
