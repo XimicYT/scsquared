@@ -618,6 +618,58 @@ app.patch('/api/groups/:id', requireAuth, async (req, res) => {
         res.status(500).json({ error: "Could not update group settings." });
     }
 });
+// 4.6. Delete Group (Creator Only)
+app.delete('/api/groups/:id', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    const myId = req.user.id;
+
+    try {
+        const { data: group, error: checkErr } = await supabase.from('groups').select('created_by').eq('id', groupId).single();
+        if (checkErr || !group) return res.status(404).json({ error: "Group not found." });
+        if (group.created_by !== myId) return res.status(403).json({ error: "Access Denied: Only the creator can delete this group." });
+
+        // Delete dependencies safely
+        await supabase.from('group_members').delete().eq('group_id', groupId);
+        await supabase.from('group_messages').delete().eq('group_id', groupId);
+        
+        const { error: deleteErr } = await supabase.from('groups').delete().eq('id', groupId);
+        if (deleteErr) throw deleteErr;
+
+        // Notify everyone in the group live that it's been disbanded
+        io.to(`group_${groupId}`).emit('group_deleted', groupId);
+
+        res.json({ success: true, message: "Group deleted successfully." });
+    } catch (err) {
+        res.status(500).json({ error: "Could not delete group." });
+    }
+});
+
+// 4.7. Leave Group (Members Only)
+app.post('/api/groups/:id/leave', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    const myId = req.user.id;
+
+    try {
+        const { data: group, error: checkErr } = await supabase.from('groups').select('created_by').eq('id', groupId).single();
+        if (checkErr || !group) return res.status(404).json({ error: "Group not found." });
+        if (group.created_by === myId) return res.status(400).json({ error: "Creators cannot leave. Transfer ownership or delete the group." });
+
+        const { error: leaveErr } = await supabase
+            .from('group_members')
+            .delete()
+            .eq('group_id', groupId)
+            .eq('user_id', myId);
+
+        if (leaveErr) throw leaveErr;
+
+        // Notify remaining members live
+        io.to(`group_${groupId}`).emit('group_members_updated', groupId);
+
+        res.json({ success: true, message: "You have left the group." });
+    } catch (err) {
+        res.status(500).json({ error: "Could not leave group." });
+    }
+});
 // 5. NEW: Get All Group Members (Provides verification context to client interfaces)
 app.get('/api/groups/:id/members', requireAuth, async (req, res) => {
     const groupId = req.params.id;
