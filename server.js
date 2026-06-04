@@ -101,12 +101,29 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
     activeUsers.set(socket.userId, socket.id);
+    
     socket.on('join_group_room', (groupId) => {
         socket.join(`group_${groupId}`);
-    });
+    }); 
+    
     socket.on('leave_group_room', (groupId) => {
         socket.leave(`group_${groupId}`);
+    }); 
+
+    // --- NEW: Listen for typing and bounce it to others ---
+    socket.on('typing', (data) => {
+        if (data.groupId) {
+            // It's a Group Chat: Bounce to everyone else in the group room
+            socket.to(`group_${data.groupId}`).emit('typing', data);
+        } else if (data.receiver_id) {
+            // It's a Direct Chat: Bounce directly to the specific user
+            const receiverSocketId = activeUsers.get(data.receiver_id);
+            if (receiverSocketId) {
+                io.to(receiverSocketId).emit('typing', data);
+            }
+        }
     });
+
     socket.on('disconnect', () => {
         activeUsers.delete(socket.userId);
     });
