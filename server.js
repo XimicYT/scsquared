@@ -942,13 +942,28 @@ app.get('/api/groups/:id/messages', requireAuth, async (req, res) => {
         res.status(500).json({ error: "Failed to fetch chat history." });
     }
 });
-// Send a message to a group chat
-app.post('/api/groups/:id/messages', messageLimiter, requireAuth, async (req, res) => {
+// Send a message to a group chat (With Optional Image Attachment)
+app.post('/api/groups/:id/messages', messageLimiter, requireAuth, (req, res, next) => {
+    // Catch multer errors gracefully
+    upload.single('attachment')(req, res, (err) => {
+        if (err) return res.status(400).json({ error: err.message });
+        next();
+    });
+}, async (req, res) => {
     const groupId = req.params.id;
     const myId = req.user.id;
     const { message_text } = req.body;
 
-    if (!message_text) return res.status(400).json({ error: "Message cannot be empty." });
+    // Require either text or an image
+    if (!message_text && !req.file) {
+        return res.status(400).json({ error: "Message text or an image is required." });
+    }
+
+    if (message_text && message_text.length > 2000) {
+        return res.status(400).json({ error: "Message exceeds the 2,000 character limit." });
+    }
+
+    const attachmentUrl = req.file ? req.file.path : null;
 
     try {
         // Double check they are actually in the group
@@ -968,7 +983,8 @@ app.post('/api/groups/:id/messages', messageLimiter, requireAuth, async (req, re
             .insert([{
                 group_id: groupId,
                 sender_id: myId,
-                message_text: message_text
+                message_text: message_text || "",
+                attachment_url: attachmentUrl
             }])
             .select(`id, message_text, attachment_url, created_at, sender_id, users(username)`)
             .single();
