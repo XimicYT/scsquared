@@ -583,7 +583,41 @@ app.post('/api/groups/:id/invite', requireAuth, async (req, res) => {
         res.status(500).json({ error: "Failed to process invitation." });
     }
 });
+// 4.5. Update Group Settings (Creator Only)
+app.patch('/api/groups/:id', requireAuth, async (req, res) => {
+    const groupId = req.params.id;
+    const myId = req.user.id;
+    let { name, description } = req.body;
 
+    name = sanitizeInput(name);
+    description = description ? sanitizeInput(description) : "";
+
+    if (!name || name.length < 1 || name.length > 50) {
+        return res.status(400).json({ error: "Title must be between 1 and 50 characters." });
+    }
+
+    try {
+        const { data: group, error: checkErr } = await supabase.from('groups').select('created_by').eq('id', groupId).single();
+        if (checkErr || !group) return res.status(404).json({ error: "Group not found." });
+        if (group.created_by !== myId) return res.status(403).json({ error: "Access Denied: Only the creator can modify settings." });
+
+        const { data: updatedGroup, error: updateErr } = await supabase
+            .from('groups')
+            .update({ name, description })
+            .eq('id', groupId)
+            .select()
+            .single();
+
+        if (updateErr) throw updateErr;
+
+        // Broadcast to everyone in the room to update their UI live
+        io.to(`group_${groupId}`).emit('group_settings_updated', updatedGroup);
+
+        res.json({ success: true, group: updatedGroup });
+    } catch (err) {
+        res.status(500).json({ error: "Could not update group settings." });
+    }
+});
 // 5. NEW: Get All Group Members (Provides verification context to client interfaces)
 app.get('/api/groups/:id/members', requireAuth, async (req, res) => {
     const groupId = req.params.id;
