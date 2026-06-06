@@ -101,39 +101,39 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
     console.log(`\n🔌 [Socket Connected] ID: ${socket.id} | User ID from Socket: ${socket.userId} (${typeof socket.userId})`);
-    
+
     if (socket.userId) {
         activeUsers.set(socket.userId, socket.id);
         console.log(`ℹ️ [Active Users Map] Updated. Total active users connected:`, Array.from(activeUsers.keys()));
     } else {
         console.warn(`⚠️ [Socket Warning] socket.userId is undefined! Typing indicators will NOT work for direct chats until your socket auth middleware sets socket.userId.`);
     }
-    
+
     socket.on('join_group_room', (groupId) => {
         console.log(`👥 [Room] Socket ${socket.id} joined group_${groupId}`);
         socket.join(`group_${groupId}`);
-    }); 
-    
+    });
+
     socket.on('leave_group_room', (groupId) => {
         console.log(`👥 [Room] Socket ${socket.id} left group_${groupId}`);
         socket.leave(`group_${groupId}`);
-    }); 
+    });
 
     // --- ENHANCED DEBUG TYPING LISTENER ---
     socket.on('typing', (data) => {
         console.log(`\n⌨️ [Server Received Typing] From socket.userId: ${socket.userId}`, data);
-        
+
         if (data.groupId) {
             console.log(`👉 [Server Bouncing] Group typing event to room: group_${data.groupId}`);
             socket.to(`group_${data.groupId}`).emit('typing', data);
         } else if (data.receiver_id) {
             const receiverSocketId = activeUsers.get(data.receiver_id);
             console.log(`👉 [Server Route] Direct typing aimed at user: ${data.receiver_id}. Found Target Socket: ${receiverSocketId}`);
-            
+
             if (!receiverSocketId) {
                 console.warn(`❌ [Server Route Failed] Target user ${data.receiver_id} not found in activeUsers map.`);
                 console.log(`📋 Current map keys:`, Array.from(activeUsers.keys()).map(k => `${k} (${typeof k})`));
-                
+
                 // Automatic type mismatch recovery check
                 const fuzzyMatchKey = Array.from(activeUsers.keys()).find(k => String(k) === String(data.receiver_id));
                 if (fuzzyMatchKey) {
@@ -149,9 +149,63 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('disconnect', () => {
+    // NEW: Listen for status changes
+    socket.on('status_change', async (data) => {
+        if (!socket.userId) return;
+
+        try {
+            // 1. Get all friends of this user
+            const { data: friends } = await supabase
+                .from('contacts')
+                .select('contact_user_id')
+                .eq('user_id', socket.userId);
+
+            if (friends) {
+                // 2. Loop through friends. If they are online, send them the status update.
+                friends.forEach(friend => {
+                    const friendSocketId = activeUsers.get(friend.contact_user_id);
+                    if (friendSocketId) {
+                        io.to(friendSocketId).emit('user_status_update', {
+                            userId: socket.userId,
+                            status: data.status
+                        });
+                    }
+                });
+            }
+        } catch (err) {
+            console.error("Status update error:", err);
+        }
+    });
+
+    // UPDATE: Modify your existing disconnect listener
+    socket.on('disconnect', async () => {
         console.log(`❌ [Socket Disconnected] ID: ${socket.id} | User ID: ${socket.userId}`);
-        activeUsers.delete(socket.userId);
+
+        if (socket.userId) {
+            try {
+                // Let friends know they went offline
+                const { data: friends } = await supabase
+                    .from('contacts')
+                    .select('contact_user_id')
+                    .eq('user_id', socket.userId);
+
+                if (friends) {
+                    friends.forEach(friend => {
+                        const friendSocketId = activeUsers.get(friend.contact_user_id);
+                        if (friendSocketId) {
+                            io.to(friendSocketId).emit('user_status_update', {
+                                userId: socket.userId,
+                                status: 'offline'
+                            });
+                        }
+                    });
+                }
+            } catch (err) {
+                console.error("Disconnect status update error:", err);
+            }
+
+            activeUsers.delete(socket.userId);
+        }
     });
 });
 
@@ -360,26 +414,26 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
 app.get('/api/contacts', requireAuth, async (req, res) => {
     const myId = req.user.id;
     try {
-        const { data: contacts, error } = await supabase.from('contacts').select(`is_favorite, is_blocked, users!contacts_contact_user_id_fkey (id, username, chat_id)`).eq('user_id', myId);
+        const { data: contacts, error } = await supabase
+            .from('contacts')
+            .select(`is_favorite, is_blocked, users!contacts_contact_user_id_fkey(id, username, chat_id, bio)`)
+            .eq('user_id', myId);
+
         if (error) throw error;
-        const baseContacts = (contacts || []).filter(c => c.users !== null);
 
-        const contactsWithMessages = await Promise.all(baseContacts.map(async (c) => {
-            const friendId = c.users.id;
-            const { data: msgs } = await supabase.from('messages').select('message_text, sender_id').or(`and(sender_id.eq.${myId},receiver_id.eq.${friendId}),and(sender_id.eq.${friendId},receiver_id.eq.${myId})`).order('created_at', { ascending: false }).limit(1);
-            const lastMsg = msgs && msgs.length > 0 ? msgs[0] : null;
-
-            const { data: reverseContact } = await supabase.from('contacts').select('is_blocked').match({ user_id: friendId, contact_user_id: myId }).single();
+        // NEW: Check activeUsers Map to attach initial status
+        const formattedContacts = contacts.map(c => {
+            const isOnline = activeUsers.has(c.users.id);
             return {
                 ...c.users,
                 is_favorite: c.is_favorite,
                 is_blocked: c.is_blocked,
-                has_blocked_me: reverseContact ? reverseContact.is_blocked : false,
-                last_message: lastMsg ? lastMsg.message_text : "No messages yet",
-                last_message_sender_id: lastMsg ? lastMsg.sender_id : null
+                current_status: isOnline ? 'online' : 'offline' // Add this property!
             };
-        }));
-        res.status(200).json({ contacts: contactsWithMessages });
+        });
+
+        // (If you have additional logic for 'has_blocked_me', keep it! Just make sure current_status is added to the returned object)
+        res.status(200).json({ contacts: formattedContacts });
     } catch (err) {
         res.status(500).json({ error: 'Server error fetching contacts.' });
     }
@@ -674,7 +728,7 @@ app.delete('/api/groups/:id', requireAuth, async (req, res) => {
         // Delete dependencies safely
         await supabase.from('group_members').delete().eq('group_id', groupId);
         await supabase.from('group_messages').delete().eq('group_id', groupId);
-        
+
         const { error: deleteErr } = await supabase.from('groups').delete().eq('id', groupId);
         if (deleteErr) throw deleteErr;
 
