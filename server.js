@@ -100,39 +100,39 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
-    console.log(`\n🔌 [Socket Connected] ID: ${socket.id} | User ID from Socket: ${socket.userId} (${typeof socket.userId})`);
+    //console.log(`\n🔌 [Socket Connected] ID: ${socket.id} | User ID from Socket: ${socket.userId} (${typeof socket.userId})`);
 
     if (socket.userId) {
         activeUsers.set(socket.userId, socket.id);
-        console.log(`ℹ️ [Active Users Map] Updated. Total active users connected:`, Array.from(activeUsers.keys()));
+        //console.log(`ℹ️ [Active Users Map] Updated. Total active users connected:`, Array.from(activeUsers.keys()));
     } else {
         console.warn(`⚠️ [Socket Warning] socket.userId is undefined! Typing indicators will NOT work for direct chats until your socket auth middleware sets socket.userId.`);
     }
 
     socket.on('join_group_room', (groupId) => {
-        console.log(`👥 [Room] Socket ${socket.id} joined group_${groupId}`);
+        //console.log(`👥 [Room] Socket ${socket.id} joined group_${groupId}`);
         socket.join(`group_${groupId}`);
     });
 
     socket.on('leave_group_room', (groupId) => {
-        console.log(`👥 [Room] Socket ${socket.id} left group_${groupId}`);
+        //console.log(`👥 [Room] Socket ${socket.id} left group_${groupId}`);
         socket.leave(`group_${groupId}`);
     });
 
     // --- ENHANCED DEBUG TYPING LISTENER ---
     socket.on('typing', (data) => {
-        console.log(`\n⌨️ [Server Received Typing] From socket.userId: ${socket.userId}`, data);
+        //console.log(`\n⌨️ [Server Received Typing] From socket.userId: ${socket.userId}`, data);
 
         if (data.groupId) {
-            console.log(`👉 [Server Bouncing] Group typing event to room: group_${data.groupId}`);
+            //console.log(`👉 [Server Bouncing] Group typing event to room: group_${data.groupId}`);
             socket.to(`group_${data.groupId}`).emit('typing', data);
         } else if (data.receiver_id) {
             const receiverSocketId = activeUsers.get(data.receiver_id);
-            console.log(`👉 [Server Route] Direct typing aimed at user: ${data.receiver_id}. Found Target Socket: ${receiverSocketId}`);
+            //console.log(`👉 [Server Route] Direct typing aimed at user: ${data.receiver_id}. Found Target Socket: ${receiverSocketId}`);
 
             if (!receiverSocketId) {
                 console.warn(`❌ [Server Route Failed] Target user ${data.receiver_id} not found in activeUsers map.`);
-                console.log(`📋 Current map keys:`, Array.from(activeUsers.keys()).map(k => `${k} (${typeof k})`));
+                //console.log(`📋 Current map keys:`, Array.from(activeUsers.keys()).map(k => `${k} (${typeof k})`));
 
                 // Automatic type mismatch recovery check
                 const fuzzyMatchKey = Array.from(activeUsers.keys()).find(k => String(k) === String(data.receiver_id));
@@ -177,34 +177,40 @@ io.on('connection', (socket) => {
         }
     });
 
-    // UPDATE: Modify your existing disconnect listener
+    // UPDATE THIS IN server.js
     socket.on('disconnect', async () => {
-        console.log(`❌ [Socket Disconnected] ID: ${socket.id} | User ID: ${socket.userId}`);
-
+        //console.log(`❌ [Socket Disconnected] ID: ${socket.id} | User ID: ${socket.userId}`);
+        
         if (socket.userId) {
-            try {
-                // Let friends know they went offline
-                const { data: friends } = await supabase
-                    .from('contacts')
-                    .select('contact_user_id')
-                    .eq('user_id', socket.userId);
+            // CRITICAL FIX: Only broadcast offline if the socket disconnecting 
+            // is the exact same one currently stored in memory!
+            // (If they have a 2nd tab open, activeUsers will hold the 2nd tab's ID)
+            if (activeUsers.get(socket.userId) === socket.id) {
+                
+                try {
+                    const { data: friends } = await supabase
+                        .from('contacts')
+                        .select('contact_user_id')
+                        .eq('user_id', socket.userId);
 
-                if (friends) {
-                    friends.forEach(friend => {
-                        const friendSocketId = activeUsers.get(friend.contact_user_id);
-                        if (friendSocketId) {
-                            io.to(friendSocketId).emit('user_status_update', {
-                                userId: socket.userId,
-                                status: 'offline'
-                            });
-                        }
-                    });
+                    if (friends) {
+                        friends.forEach(friend => {
+                            const friendSocketId = activeUsers.get(friend.contact_user_id);
+                            if (friendSocketId) {
+                                io.to(friendSocketId).emit('user_status_update', { 
+                                    userId: socket.userId, 
+                                    status: 'offline' 
+                                });
+                            }
+                        });
+                    }
+                } catch (err) {
+                    console.error("Disconnect status update error:", err);
                 }
-            } catch (err) {
-                console.error("Disconnect status update error:", err);
+                
+                // Finally remove them
+                activeUsers.delete(socket.userId);
             }
-
-            activeUsers.delete(socket.userId);
         }
     });
 });
