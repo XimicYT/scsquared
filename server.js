@@ -71,7 +71,10 @@ const io = new Server(server, {
     cors: {
         origin: true,
         credentials: true
-    }
+    },
+    // Add these two lines right here:
+    pingInterval: 10000, // The server says "Are you there?" every 10 seconds
+    pingTimeout: 15000   // The server waits 15 seconds for a reply before killing the connection
 });
 
 const activeUsers = new Map();
@@ -180,13 +183,13 @@ io.on('connection', (socket) => {
     // UPDATE THIS IN server.js
     socket.on('disconnect', async () => {
         //console.log(`❌ [Socket Disconnected] ID: ${socket.id} | User ID: ${socket.userId}`);
-        
+
         if (socket.userId) {
             // CRITICAL FIX: Only broadcast offline if the socket disconnecting 
             // is the exact same one currently stored in memory!
             // (If they have a 2nd tab open, activeUsers will hold the 2nd tab's ID)
             if (activeUsers.get(socket.userId) === socket.id) {
-                
+
                 try {
                     const { data: friends } = await supabase
                         .from('contacts')
@@ -197,9 +200,9 @@ io.on('connection', (socket) => {
                         friends.forEach(friend => {
                             const friendSocketId = activeUsers.get(friend.contact_user_id);
                             if (friendSocketId) {
-                                io.to(friendSocketId).emit('user_status_update', { 
-                                    userId: socket.userId, 
-                                    status: 'offline' 
+                                io.to(friendSocketId).emit('user_status_update', {
+                                    userId: socket.userId,
+                                    status: 'offline'
                                 });
                             }
                         });
@@ -207,7 +210,7 @@ io.on('connection', (socket) => {
                 } catch (err) {
                     console.error("Disconnect status update error:", err);
                 }
-                
+
                 // Finally remove them
                 activeUsers.delete(socket.userId);
             }
