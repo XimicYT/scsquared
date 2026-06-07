@@ -430,20 +430,42 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
 
         if (error) throw error;
 
-        // NEW: Check activeUsers Map to attach initial status
-        const formattedContacts = contacts.map(c => {
+        // Use Promise.all to fetch the latest message for each contact concurrently
+        const formattedContacts = await Promise.all(contacts.map(async (c) => {
             const isOnline = activeUsers.has(c.users.id);
+
+            // 1. Fetch the most recent message between you and this contact
+            const { data: lastMsgData } = await supabase
+                .from('messages')
+                .select('message_text, attachment_url, sender_id')
+                .or(`and(sender_id.eq.${myId},receiver_id.eq.${c.users.id}),and(sender_id.eq.${c.users.id},receiver_id.eq.${myId})`)
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .single();
+
+            // 2. Format the preview text (handle image-only messages safely)
+            let previewText = "";
+            let senderId = null;
+
+            if (lastMsgData) {
+                previewText = lastMsgData.message_text || (lastMsgData.attachment_url ? '📸 Image' : '');
+                senderId = lastMsgData.sender_id;
+            }
+
+            // 3. Return the fully assembled contact object
             return {
                 ...c.users,
                 is_favorite: c.is_favorite,
                 is_blocked: c.is_blocked,
-                current_status: isOnline ? 'online' : 'offline' // Add this property!
+                last_message: previewText,             // <--- Frontend needs this!
+                last_message_sender_id: senderId,      // <--- Frontend needs this!
+                current_status: isOnline ? 'online' : 'offline'
             };
-        });
+        }));
 
-        // (If you have additional logic for 'has_blocked_me', keep it! Just make sure current_status is added to the returned object)
         res.status(200).json({ contacts: formattedContacts });
     } catch (err) {
+        console.error("Error fetching contacts:", err);
         res.status(500).json({ error: 'Server error fetching contacts.' });
     }
 });
