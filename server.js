@@ -72,9 +72,8 @@ const io = new Server(server, {
         origin: true,
         credentials: true
     },
-    // Add these two lines right here:
-    pingInterval: 10000, // The server says "Are you there?" every 10 seconds
-    pingTimeout: 15000   // The server waits 15 seconds for a reply before killing the connection
+    pingInterval: 10000,
+    pingTimeout: 15000
 });
 
 const activeUsers = new Map();
@@ -103,116 +102,48 @@ io.use((socket, next) => {
 });
 
 io.on('connection', (socket) => {
-    //console.log(`\n🔌 [Socket Connected] ID: ${socket.id} | User ID from Socket: ${socket.userId} (${typeof socket.userId})`);
 
-    if (socket.userId) {
-        activeUsers.set(socket.userId, socket.id);
-        //console.log(`ℹ️ [Active Users Map] Updated. Total active users connected:`, Array.from(activeUsers.keys()));
-    } else {
-        console.warn(`⚠️ [Socket Warning] socket.userId is undefined! Typing indicators will NOT work for direct chats until your socket auth middleware sets socket.userId.`);
-    }
+    // SECURE REGISTER: Relies on JWT userId, ignores client payload
+    socket.on('register', () => {
+        const userId = socket.userId;
 
-    socket.on('join_group_room', (groupId) => {
-        //console.log(`👥 [Room] Socket ${socket.id} joined group_${groupId}`);
-        socket.join(`group_${groupId}`);
+        if (!activeUsers.has(userId)) {
+            activeUsers.set(userId, new Set());
+        }
+
+        const userConnections = activeUsers.get(userId);
+
+        // If this is their FIRST tab opening, tell everyone they are online
+        if (userConnections.size === 0) {
+            io.emit('user_status_update', { userId: userId, status: 'online' });
+        }
+
+        userConnections.add(socket.id);
     });
 
-    socket.on('leave_group_room', (groupId) => {
-        //console.log(`👥 [Room] Socket ${socket.id} left group_${groupId}`);
-        socket.leave(`group_${groupId}`);
-    });
-
-    // --- ENHANCED DEBUG TYPING LISTENER ---
+    // MISSING FEATURE ADDED: Relays typing events to the specific user's active tabs
     socket.on('typing', (data) => {
-        //console.log(`\n⌨️ [Server Received Typing] From socket.userId: ${socket.userId}`, data);
-
-        if (data.groupId) {
-            //console.log(`👉 [Server Bouncing] Group typing event to room: group_${data.groupId}`);
-            socket.to(`group_${data.groupId}`).emit('typing', data);
-        } else if (data.receiver_id) {
-            const receiverSocketId = activeUsers.get(data.receiver_id);
-            //console.log(`👉 [Server Route] Direct typing aimed at user: ${data.receiver_id}. Found Target Socket: ${receiverSocketId}`);
-
-            if (!receiverSocketId) {
-                console.warn(`❌ [Server Route Failed] Target user ${data.receiver_id} not found in activeUsers map.`);
-                //console.log(`📋 Current map keys:`, Array.from(activeUsers.keys()).map(k => `${k} (${typeof k})`));
-
-                // Automatic type mismatch recovery check
-                const fuzzyMatchKey = Array.from(activeUsers.keys()).find(k => String(k) === String(data.receiver_id));
-                if (fuzzyMatchKey) {
-                    console.log(`💡 [Fuzzy Match Found] Type mismatch detected! Map has ${typeof fuzzyMatchKey} but request sent ${typeof data.receiver_id}. Bouncing to key alternative.`);
-                    io.to(activeUsers.get(fuzzyMatchKey)).emit('typing', data);
-                }
-            } else {
-                io.to(receiverSocketId).emit('typing', data);
-                console.log(`✅ [Server Route Success] Sent typing event directly to socket ${receiverSocketId}`);
-            }
-        } else {
-            console.warn(`⚠️ [Server Data Error] Received typing event with neither groupId nor receiver_id!`, data);
+        const receiverSockets = activeUsers.get(data.receiver_id);
+        if (receiverSockets && receiverSockets.size > 0) {
+            io.to([...receiverSockets]).emit('typing', {
+                sender_id: socket.userId,
+                username: data.username,
+                isTyping: data.isTyping,
+                receiver_id: data.receiver_id
+            });
         }
     });
 
-    // NEW: Listen for status changes
-    socket.on('status_change', async (data) => {
-        if (!socket.userId) return;
+    socket.on('disconnect', () => {
+        const userId = socket.userId;
+        if (userId && activeUsers.has(userId)) {
+            const userConnections = activeUsers.get(userId);
+            userConnections.delete(socket.id); // Remove this specific tab
 
-        try {
-            // 1. Get all friends of this user
-            const { data: friends } = await supabase
-                .from('contacts')
-                .select('contact_user_id')
-                .eq('user_id', socket.userId);
-
-            if (friends) {
-                // 2. Loop through friends. If they are online, send them the status update.
-                friends.forEach(friend => {
-                    const friendSocketId = activeUsers.get(friend.contact_user_id);
-                    if (friendSocketId) {
-                        io.to(friendSocketId).emit('user_status_update', {
-                            userId: socket.userId,
-                            status: data.status
-                        });
-                    }
-                });
-            }
-        } catch (err) {
-            console.error("Status update error:", err);
-        }
-    });
-
-    // UPDATE THIS IN server.js
-    socket.on('disconnect', async () => {
-        //console.log(`❌ [Socket Disconnected] ID: ${socket.id} | User ID: ${socket.userId}`);
-
-        if (socket.userId) {
-            // CRITICAL FIX: Only broadcast offline if the socket disconnecting 
-            // is the exact same one currently stored in memory!
-            // (If they have a 2nd tab open, activeUsers will hold the 2nd tab's ID)
-            if (activeUsers.get(socket.userId) === socket.id) {
-
-                try {
-                    const { data: friends } = await supabase
-                        .from('contacts')
-                        .select('contact_user_id')
-                        .eq('user_id', socket.userId);
-
-                    if (friends) {
-                        friends.forEach(friend => {
-                            const friendSocketId = activeUsers.get(friend.contact_user_id);
-                            if (friendSocketId) {
-                                io.to(friendSocketId).emit('user_status_update', {
-                                    userId: socket.userId,
-                                    status: 'offline'
-                                });
-                            }
-                        });
-                    }
-                } catch (err) {
-                    console.error("Disconnect status update error:", err);
-                }
-
-                // Finally remove them
-                activeUsers.delete(socket.userId);
+            // If they have NO tabs left open, tell everyone they are offline
+            if (userConnections.size === 0) {
+                activeUsers.delete(userId);
+                io.emit('user_status_update', { userId: userId, status: 'offline' });
             }
         }
     });
@@ -412,8 +343,10 @@ app.post('/api/contacts/add', requireAuth, async (req, res) => {
         const { error: insertError } = await supabase.from('contacts').insert([{ user_id: myId, contact_user_id: friend.id }, { user_id: friend.id, contact_user_id: myId }]);
         if (insertError) throw insertError;
 
-        const friendSocket = activeUsers.get(friend.id);
-        if (friendSocket) io.to(friendSocket).emit('contacts_updated');
+        // FIXED: Spread Set into Array for io.to()
+        const friendSockets = activeUsers.get(friend.id);
+        if (friendSockets && friendSockets.size > 0) io.to([...friendSockets]).emit('contacts_updated');
+
         res.status(200).json({ message: `${friend.username} added!`, friend });
     } catch (err) {
         res.status(500).json({ error: 'Server error adding contact.' });
@@ -476,8 +409,11 @@ app.delete('/api/contacts/:contact_id', requireAuth, async (req, res) => {
     try {
         await supabase.from('contacts').delete().match({ user_id: myId, contact_user_id: contactId });
         await supabase.from('contacts').delete().match({ user_id: contactId, contact_user_id: myId });
-        const friendSocket = activeUsers.get(contactId);
-        if (friendSocket) io.to(friendSocket).emit('contacts_updated');
+
+        // FIXED: Spread Set into Array for io.to()
+        const friendSockets = activeUsers.get(contactId);
+        if (friendSockets && friendSockets.size > 0) io.to([...friendSockets]).emit('contacts_updated');
+
         res.status(200).json({ message: 'Contact removed.' });
     } catch (err) {
         res.status(500).json({ error: 'Server error removing contact.' });
@@ -554,8 +490,10 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
         const { data: newMessage, error } = await supabase.from('messages').insert([{ sender_id: myId, receiver_id, message_text: message_text || "", attachment_url: attachmentUrl, is_read: false }]).select().single();
         if (error) throw error;
 
-        const receiverSocketId = activeUsers.get(receiver_id);
-        if (receiverSocketId) io.to(receiverSocketId).emit('receive_message', newMessage);
+        // FIXED: Spread Set into Array for io.to()
+        const receiverSockets = activeUsers.get(receiver_id);
+        if (receiverSockets && receiverSockets.size > 0) io.to([...receiverSockets]).emit('receive_message', newMessage);
+
         res.status(201).json(newMessage);
     } catch (err) {
         res.status(500).json({ error: 'Failed to send message.' });
@@ -566,7 +504,7 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
 // 👥 GROUP CHATS API ENDPOINTS
 // ==========================================
 
-// 1. GET All Groups for the Logged-in User (FIXED: Only shows groups that have been explicitly accepted/joined)
+// 1. GET All Groups for the Logged-in User
 app.get('/api/groups', requireAuth, async (req, res) => {
     const myId = req.user.id;
     try {
@@ -583,7 +521,7 @@ app.get('/api/groups', requireAuth, async (req, res) => {
                 )
             `)
             .eq('user_id', myId)
-            .eq('status', 'joined'); // <-- FIX: Strict structural enforcement (hides pending text channels)
+            .eq('status', 'joined');
 
         if (error) throw error;
 
@@ -628,7 +566,7 @@ app.get('/api/groups/invites', requireAuth, async (req, res) => {
     }
 });
 
-// 3. Create group chat (FIXED: Creator is set to 'joined', bulk members are set to 'invited')
+// 3. Create group chat 
 app.post('/api/groups', requireAuth, async (req, res) => {
     const myId = req.user.id;
     let { name, description, members } = req.body;
@@ -653,7 +591,6 @@ app.post('/api/groups', requireAuth, async (req, res) => {
         if (!memberIds.includes(myId)) memberIds.push(myId);
         memberIds = [...new Set(memberIds)];
 
-        // FIX: Structural verification ensuring only the creator has immediate clearance
         const membersToInsert = memberIds.map(id => ({
             group_id: group.id,
             user_id: id,
@@ -665,8 +602,9 @@ app.post('/api/groups', requireAuth, async (req, res) => {
 
         memberIds.forEach(targetId => {
             if (targetId !== myId) {
-                const receiverSocketId = activeUsers.get(targetId);
-                if (receiverSocketId) io.to(receiverSocketId).emit('group_invite_received');
+                // FIXED: Spread Set into Array for io.to()
+                const receiverSockets = activeUsers.get(targetId);
+                if (receiverSockets && receiverSockets.size > 0) io.to([...receiverSockets]).emit('group_invite_received');
             }
         });
 
@@ -676,14 +614,13 @@ app.post('/api/groups', requireAuth, async (req, res) => {
     }
 });
 
-// 4. Invite user by Tag (FIXED: Creator-only enforcement check)
+// 4. Invite user by Tag
 app.post('/api/groups/:id/invite', requireAuth, async (req, res) => {
     const groupId = req.params.id;
     let { user_tag } = req.body;
     user_tag = sanitizeInput(user_tag);
 
     try {
-        // ENFORCEMENT: Fetch the underlying chat matrix architecture configuration
         const { data: group, error: groupErr } = await supabase.from('groups').select('created_by').eq('id', groupId).single();
         if (groupErr || !group) return res.status(404).json({ error: "No group found with that ID." });
 
@@ -703,14 +640,16 @@ app.post('/api/groups/:id/invite', requireAuth, async (req, res) => {
         const { error: inviteError } = await supabase.from('group_members').insert([{ group_id: groupId, user_id: targetUser.id, status: 'invited' }]);
         if (inviteError) throw inviteError;
 
-        const receiverSocketId = activeUsers.get(targetUser.id);
-        if (receiverSocketId) io.to(receiverSocketId).emit('group_invite_received');
+        // FIXED: Spread Set into Array for io.to()
+        const receiverSockets = activeUsers.get(targetUser.id);
+        if (receiverSockets && receiverSockets.size > 0) io.to([...receiverSockets]).emit('group_invite_received');
 
         res.json({ success: true, message: `Successfully invited ${targetUser.username}!` });
     } catch (err) {
         res.status(500).json({ error: "Failed to process invitation." });
     }
 });
+
 // 4.5. Update Group Settings (Creator Only)
 app.patch('/api/groups/:id', requireAuth, async (req, res) => {
     const groupId = req.params.id;
@@ -738,7 +677,6 @@ app.patch('/api/groups/:id', requireAuth, async (req, res) => {
 
         if (updateErr) throw updateErr;
 
-        // Broadcast to everyone in the room to update their UI live
         io.to(`group_${groupId}`).emit('group_settings_updated', updatedGroup);
 
         res.json({ success: true, group: updatedGroup });
@@ -746,6 +684,7 @@ app.patch('/api/groups/:id', requireAuth, async (req, res) => {
         res.status(500).json({ error: "Could not update group settings." });
     }
 });
+
 // 4.6. Delete Group (Creator Only)
 app.delete('/api/groups/:id', requireAuth, async (req, res) => {
     const groupId = req.params.id;
@@ -763,7 +702,6 @@ app.delete('/api/groups/:id', requireAuth, async (req, res) => {
         const { error: deleteErr } = await supabase.from('groups').delete().eq('id', groupId);
         if (deleteErr) throw deleteErr;
 
-        // Notify everyone in the group live that it's been disbanded
         io.to(`group_${groupId}`).emit('group_deleted', groupId);
 
         res.json({ success: true, message: "Group deleted successfully." });
@@ -790,7 +728,6 @@ app.post('/api/groups/:id/leave', requireAuth, async (req, res) => {
 
         if (leaveErr) throw leaveErr;
 
-        // Notify remaining members live
         io.to(`group_${groupId}`).emit('group_members_updated', groupId);
 
         res.json({ success: true, message: "You have left the group." });
@@ -798,7 +735,8 @@ app.post('/api/groups/:id/leave', requireAuth, async (req, res) => {
         res.status(500).json({ error: "Could not leave group." });
     }
 });
-// 5. NEW: Get All Group Members (Provides verification context to client interfaces)
+
+// 5. NEW: Get All Group Members
 app.get('/api/groups/:id/members', requireAuth, async (req, res) => {
     const groupId = req.params.id;
     const myId = req.user.id;
@@ -853,10 +791,10 @@ app.delete('/api/groups/:id/members/:memberId', requireAuth, async (req, res) =>
         const { error: deleteError } = await supabase.from('group_members').delete().eq('group_id', groupId).eq('user_id', memberId);
         if (deleteError) throw deleteError;
 
-        // WebSocket pipeline management: evict live listeners instantly
-        const targetSocketId = activeUsers.get(memberId);
-        if (targetSocketId) {
-            io.to(targetSocketId).emit('group_removed', groupId);
+        // FIXED: Spread Set into Array for io.to()
+        const targetSockets = activeUsers.get(memberId);
+        if (targetSockets && targetSockets.size > 0) {
+            io.to([...targetSockets]).emit('group_removed', groupId);
         }
 
         io.to(`group_${groupId}`).emit('group_members_updated', groupId);
