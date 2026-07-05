@@ -871,7 +871,98 @@ app.post('/api/groups/:id/messages', messageLimiter, requireAuth, (req, res, nex
         res.status(500).json({ error: 'Failed to send group message.' });
     }
 });
+// ==========================================
+// 📊 POLLS API ENDPOINTS & LOGIC
+// ==========================================
 
+// 1. Create a new poll
+app.post('/api/polls', requireAuth, async (req, res) => {
+    const { question, options } = req.body;
+    const myId = req.user.id;
+    
+    // Basic validation
+    if (!question || !Array.isArray(options) || options.length < 2) {
+        return res.status(400).json({ error: "Invalid poll data. Need a question and at least 2 options." });
+    }
+
+    try {
+        const { data: poll, error } = await supabase
+            .from('polls')
+            .insert([{ creator_id: myId, question, options }])
+            .select()
+            .single();
+            
+        if (error) throw error;
+        res.status(201).json(poll);
+    } catch (err) {
+        console.error("Poll Creation Error:", err);
+        res.status(500).json({ error: "Failed to create poll." });
+    }
+});
+
+// 2. Fetch poll details and all votes
+app.get('/api/polls/:id', requireAuth, async (req, res) => {
+    try {
+        // Fetch the poll
+        const { data: poll, error: pollError } = await supabase
+            .from('polls')
+            .select('*')
+            .eq('id', req.params.id)
+            .single();
+            
+        if (pollError) throw pollError;
+
+        // Fetch all votes associated with it
+        const { data: votes, error: votesError } = await supabase
+            .from('poll_votes')
+            .select('user_id, option_index')
+            .eq('poll_id', req.params.id);
+            
+        if (votesError) throw votesError;
+
+        res.status(200).json({ poll, votes });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to load poll data." });
+    }
+});
+
+// 3. Cast or change a vote
+app.post('/api/polls/:id/vote', requireAuth, async (req, res) => {
+    const pollId = req.params.id;
+    const myId = req.user.id;
+    const { option_index } = req.body;
+
+    if (option_index === undefined || option_index === null) {
+        return res.status(400).json({ error: "Missing option index." });
+    }
+
+    try {
+        // Check if the user has already voted on this specific poll
+        const { data: existingVote } = await supabase
+            .from('poll_votes')
+            .select('id')
+            .eq('poll_id', pollId)
+            .eq('user_id', myId)
+            .single();
+
+        if (existingVote) {
+            // Update their existing vote
+            await supabase.from('poll_votes').update({ option_index }).eq('id', existingVote.id);
+        } else {
+            // Insert a new vote
+            await supabase.from('poll_votes').insert([{ poll_id: pollId, user_id: myId, option_index }]);
+        }
+        
+        // 🔥 THE MAGIC: Broadcast to all active clients that this specific poll updated!
+        // The frontend widgets will listen to this and silently re-fetch if they are currently rendering this poll.
+        io.emit('poll_updated', pollId);
+
+        res.status(200).json({ success: true });
+    } catch (err) {
+        console.error("Vote Error:", err);
+        res.status(500).json({ error: "Failed to cast vote." });
+    }
+});
 server.listen(PORT, () => {
     console.log(`Server running smoothly on port ${PORT}`);
 });
