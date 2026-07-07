@@ -15,7 +15,7 @@ const webpush = require('web-push');
 // 1. General API Rate Limiter
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100,
+    max: 10000,
     message: { error: "Too many requests from this IP, please try again after 15 minutes." },
     standardHeaders: true,
     legacyHeaders: false,
