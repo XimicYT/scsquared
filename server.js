@@ -158,11 +158,18 @@ io.on('connection', (socket) => {
 
         userConnections.add(socket.id);
     });
-    // Add this right below your register event inside io.on('connection')
     socket.on('status_change', (data) => {
         const userId = socket.userId;
+
+        // 🔍 ADD THIS LOG
+        console.log(`[SERVER DEBUG] Received 'status_change'. UserID: ${userId || 'UNDEFINED'}, Status: ${data.status}`);
+
         if (userId) {
             userStatuses.set(userId, data.status);
+            // 🔥 CRITICAL: Broadcast the update out so other users' UIs actually change!
+            io.emit('user_status_update', { userId: userId, status: data.status });
+        } else {
+            console.error(`[SERVER DEBUG] ❌ Rejected status update! This socket connection has no userId attached.`);
         }
     });
     // MISSING FEATURE ADDED: Relays typing events to the specific user's active tabs
@@ -182,7 +189,7 @@ io.on('connection', (socket) => {
         const userId = socket.userId;
         if (userId && activeUsers.has(userId)) {
             const userConnections = activeUsers.get(userId);
-            userConnections.delete(socket.id); 
+            userConnections.delete(socket.id);
 
             if (userConnections.size === 0) {
                 activeUsers.delete(userId);
@@ -533,7 +540,7 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
 
         // Send push if they are offline (no sockets) OR if they are marked as away/inactive
         if (!receiverSockets || receiverSockets.size === 0 || receiverStatus === 'away' || receiverStatus === 'inactive') {
-            
+
             // User is offline or away, send the background push!
             await sendPushNotification(receiver_id, {
                 title: title,
