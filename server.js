@@ -161,15 +161,10 @@ io.on('connection', (socket) => {
     socket.on('status_change', (data) => {
         const userId = socket.userId;
 
-        // 🔍 ADD THIS LOG
-        console.log(`[SERVER DEBUG] Received 'status_change'. UserID: ${userId || 'UNDEFINED'}, Status: ${data.status}`);
-
         if (userId) {
             userStatuses.set(userId, data.status);
             // 🔥 CRITICAL: Broadcast the update out so other users' UIs actually change!
             io.emit('user_status_update', { userId: userId, status: data.status });
-        } else {
-            console.error(`[SERVER DEBUG] ❌ Rejected status update! This socket connection has no userId attached.`);
         }
     });
     // MISSING FEATURE ADDED: Relays typing events to the specific user's active tabs
