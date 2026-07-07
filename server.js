@@ -10,6 +10,7 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const rateLimit = require('express-rate-limit');
+const webpush = require('web-push');
 
 // 1. General API Rate Limiter
 const apiLimiter = rateLimit({
@@ -40,7 +41,44 @@ cloudinary.config({
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET
 });
+webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT,
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+);
 
+// Helper function to send push notifications securely
+async function sendPushNotification(userId, payload) {
+    try {
+        const { data: subscriptions } = await supabase
+            .from('push_subscriptions')
+            .select('*')
+            .eq('user_id', userId);
+
+        if (!subscriptions || subscriptions.length === 0) return;
+
+        const pushPayload = JSON.stringify(payload);
+
+        // Send to all of the user's registered devices
+        await Promise.all(subscriptions.map(async (sub) => {
+            const pushConfig = {
+                endpoint: sub.endpoint,
+                keys: { auth: sub.keys_auth, p256dh: sub.keys_p256dh }
+            };
+
+            try {
+                await webpush.sendNotification(pushConfig, pushPayload);
+            } catch (err) {
+                // If the device unsubscribed or the token expired, delete it
+                if (err.statusCode === 404 || err.statusCode === 410) {
+                    await supabase.from('push_subscriptions').delete().eq('id', sub.id);
+                }
+            }
+        }));
+    } catch (err) {
+        console.error("Push notification routing error:", err);
+    }
+}
 const storage = new CloudinaryStorage({
     cloudinary: cloudinary,
     params: {
@@ -452,7 +490,58 @@ app.patch('/api/contacts/favorite', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error updating favorites.' });
     }
 });
+app.post('/api/notifications/subscribe', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    const { subscription } = req.body;
 
+    if (!subscription || !subscription.endpoint) {
+        return res.status(400).json({ error: "Invalid subscription payload." });
+    }
+
+    try {
+        // Upsert the subscription (handles if the same device sends it twice)
+        const { error } = await supabase.from('push_subscriptions').upsert({
+            user_id: myId,
+            endpoint: subscription.endpoint,
+            keys_auth: subscription.keys.auth,
+            keys_p256dh: subscription.keys.p256dh
+        }, { onConflict: 'endpoint' });
+
+        if (error) throw error;
+        res.status(200).json({ success: true, message: "Device registered for push." });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to save push subscription." });
+    }
+});
+// Generic endpoint to trigger a notification from the frontend
+app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
+    const { receiver_id, title, body, url } = req.body;
+
+    if (!receiver_id || !title) {
+        return res.status(400).json({ error: "Missing required notification fields." });
+    }
+
+    try {
+        // OPTIONAL BUT HIGHLY RECOMMENDED: 
+        // Check if the user is currently online via sockets before sending the push.
+        // If they are online, you probably don't want to buzz their phone.
+        const receiverSockets = activeUsers.get(receiver_id);
+        if (!receiverSockets || receiverSockets.size === 0) {
+            
+            // User is offline, send the background push!
+            await sendPushNotification(receiver_id, {
+                title: title,
+                body: body || 'You have a new notification',
+                url: url || '/'
+            });
+        }
+
+        res.status(200).json({ success: true, message: "Notification processed." });
+    } catch (err) {
+        console.error("Error triggering notification:", err);
+        res.status(500).json({ error: "Failed to trigger notification." });
+    }
+});
 // --- MESSAGES API ---
 app.get('/api/messages/:contactId', requireAuth, async (req, res) => {
     const myId = req.user.id;
@@ -879,7 +968,7 @@ app.post('/api/groups/:id/messages', messageLimiter, requireAuth, (req, res, nex
 app.post('/api/polls', requireAuth, async (req, res) => {
     const { question, options } = req.body;
     const myId = req.user.id;
-    
+
     // Basic validation
     if (!question || !Array.isArray(options) || options.length < 2) {
         return res.status(400).json({ error: "Invalid poll data. Need a question and at least 2 options." });
@@ -891,7 +980,7 @@ app.post('/api/polls', requireAuth, async (req, res) => {
             .insert([{ creator_id: myId, question, options }])
             .select()
             .single();
-            
+
         if (error) throw error;
         res.status(201).json(poll);
     } catch (err) {
@@ -909,7 +998,7 @@ app.get('/api/polls/:id', requireAuth, async (req, res) => {
             .select('*')
             .eq('id', req.params.id)
             .single();
-            
+
         if (pollError) throw pollError;
 
         // Fetch all votes associated with it
@@ -917,7 +1006,7 @@ app.get('/api/polls/:id', requireAuth, async (req, res) => {
             .from('poll_votes')
             .select('user_id, option_index')
             .eq('poll_id', req.params.id);
-            
+
         if (votesError) throw votesError;
 
         res.status(200).json({ poll, votes });
@@ -952,7 +1041,7 @@ app.post('/api/polls/:id/vote', requireAuth, async (req, res) => {
             // Insert a new vote
             await supabase.from('poll_votes').insert([{ poll_id: pollId, user_id: myId, option_index }]);
         }
-        
+
         // 🔥 THE MAGIC: Broadcast to all active clients that this specific poll updated!
         // The frontend widgets will listen to this and silently re-fetch if they are currently rendering this poll.
         io.emit('poll_updated', pollId);
