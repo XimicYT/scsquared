@@ -418,6 +418,9 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
         const formattedContacts = await Promise.all(contacts.map(async (c) => {
             const isOnline = activeUsers.has(c.users.id);
 
+            // 🔥 ADD THIS: Grab their exact status if they are online, otherwise fallback to offline
+            const exactStatus = isOnline ? (userStatuses.get(c.users.id) || 'online') : 'offline';
+
             // 1. Fetch the most recent message between you and this contact
             const { data: lastMsgData } = await supabase
                 .from('messages')
@@ -441,9 +444,9 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                 ...c.users,
                 is_favorite: c.is_favorite,
                 is_blocked: c.is_blocked,
-                last_message: previewText,             // <--- Frontend needs this!
-                last_message_sender_id: senderId,      // <--- Frontend needs this!
-                current_status: isOnline ? 'online' : 'offline'
+                last_message: previewText,
+                last_message_sender_id: senderId,
+                current_status: exactStatus  // 🔥 CHANGE THIS LINE to use exactStatus
             };
         }));
 
