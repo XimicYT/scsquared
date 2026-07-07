@@ -115,7 +115,7 @@ const io = new Server(server, {
 });
 
 const activeUsers = new Map();
-
+const userStatuses = new Map(); // ADD THIS LINE
 // Secure Socket Authentication Middleware
 io.use((socket, next) => {
     const cookieHeader = socket.request.headers.cookie;
@@ -158,7 +158,13 @@ io.on('connection', (socket) => {
 
         userConnections.add(socket.id);
     });
-
+    // Add this right below your register event inside io.on('connection')
+    socket.on('status_change', (data) => {
+        const userId = socket.userId;
+        if (userId) {
+            userStatuses.set(userId, data.status);
+        }
+    });
     // MISSING FEATURE ADDED: Relays typing events to the specific user's active tabs
     socket.on('typing', (data) => {
         const receiverSockets = activeUsers.get(data.receiver_id);
@@ -176,11 +182,11 @@ io.on('connection', (socket) => {
         const userId = socket.userId;
         if (userId && activeUsers.has(userId)) {
             const userConnections = activeUsers.get(userId);
-            userConnections.delete(socket.id); // Remove this specific tab
+            userConnections.delete(socket.id); 
 
-            // If they have NO tabs left open, tell everyone they are offline
             if (userConnections.size === 0) {
                 activeUsers.delete(userId);
+                userStatuses.delete(userId); // ADD THIS LINE to clean up
                 io.emit('user_status_update', { userId: userId, status: 'offline' });
             }
         }
@@ -522,13 +528,13 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
     }
 
     try {
-        // OPTIONAL BUT HIGHLY RECOMMENDED: 
-        // Check if the user is currently online via sockets before sending the push.
-        // If they are online, you probably don't want to buzz their phone.
         const receiverSockets = activeUsers.get(receiver_id);
-        if (!receiverSockets || receiverSockets.size === 0) {
+        const receiverStatus = userStatuses.get(receiver_id) || 'offline'; // Grab their exact status
+
+        // Send push if they are offline (no sockets) OR if they are marked as away/inactive
+        if (!receiverSockets || receiverSockets.size === 0 || receiverStatus === 'away' || receiverStatus === 'inactive') {
             
-            // User is offline, send the background push!
+            // User is offline or away, send the background push!
             await sendPushNotification(receiver_id, {
                 title: title,
                 body: body || 'You have a new notification',
