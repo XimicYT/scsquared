@@ -57,7 +57,9 @@ async function sendPushNotification(userId, payload) {
 
         if (!subscriptions || subscriptions.length === 0) return;
 
-        const pushPayload = JSON.stringify(payload);
+        const standardizedPayload = JSON.stringify({
+            data: payload
+        });
 
         // Send to all of the user's registered devices
         await Promise.all(subscriptions.map(async (sub) => {
@@ -67,7 +69,7 @@ async function sendPushNotification(userId, payload) {
             };
 
             try {
-                await webpush.sendNotification(pushConfig, pushPayload);
+                await webpush.sendNotification(pushConfig, standardizedPayload);
             } catch (err) {
                 // If the device unsubscribed or the token expired, delete it
                 if (err.statusCode === 404 || err.statusCode === 410) {
@@ -527,27 +529,52 @@ app.post('/api/notifications/subscribe', requireAuth, async (req, res) => {
 // Generic endpoint to trigger a notification from the frontend
 app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
     const { receiver_id, title, body, url } = req.body;
-
+    const senderId = req.user.id; // 🔥 NEW: Grab the sender's ID from the JWT cookie
+    
     if (!receiver_id || !title) {
         return res.status(400).json({ error: "Missing required notification fields." });
     }
 
     try {
+        // 🔥 THE POLISH: Check if the receiver has blocked the sender
+        const { data: isBlocked } = await supabase
+            .from('contacts')
+            .select('is_blocked')
+            .eq('user_id', receiver_id)
+            .eq('contact_user_id', senderId)
+            .eq('is_blocked', true)
+            .single();
+
+        if (isBlocked) {
+            // Silently return 200 so the frontend doesn't throw an error, but drop the notification.
+            return res.status(200).json({ success: true, message: "Notification silenced (blocked)." });
+        }
+
+        // 🔥 THE WOW FACTOR: Fetch the sender's first name for a personalized title
+        const { data: sender } = await supabase
+            .from('users')
+            .select('first_name')
+            .eq('id', senderId)
+            .single();
+
+        // Construct the premium title (Fallback to original title if first_name isn't found)
+        const premiumTitle = sender && sender.first_name ? `Ping from ${sender.first_name}` : title;
+
         const receiverSockets = activeUsers.get(receiver_id);
         const receiverStatus = userStatuses.get(receiver_id) || 'offline'; // Grab their exact status
 
         // Send push if they are offline (no sockets) OR if they are marked as away/inactive
         if (!receiverSockets || receiverSockets.size === 0 || receiverStatus === 'away' || receiverStatus === 'inactive') {
             await sendPushNotification(receiver_id, {
-                title: title,
+                title: premiumTitle, // 👈 Injecting personalized title
                 body: body || 'You have a new notification',
                 url: url || '/'
             });
         } else {
-            // 🔥 NEW: User is ONLINE. Send in-app notification to all their active tabs
+            // User is ONLINE. Send in-app notification to all their active tabs
             for (const socketId of receiverSockets) {
                 io.to(socketId).emit('in_app_notification', {
-                    title: title,
+                    title: premiumTitle, // 👈 Injecting personalized title
                     body: body || 'You have a new message',
                     url: url || '/'
                 });
