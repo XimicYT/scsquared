@@ -534,14 +534,17 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
 
     try {
         const receiverSockets = activeUsers.get(receiver_id);
-        
-        // ==========================================
-        // 🧪 TEMPORARY TEST OVERRIDE: 
-        // Force the server to skip the OS push and ONLY send the socket event
-        // ==========================================
-        
-        if (receiverSockets && receiverSockets.size > 0) {
-            console.log(`[TEST] Forcing in-app toast to user: ${receiver_id}`);
+        const receiverStatus = userStatuses.get(receiver_id) || 'offline'; // Grab their exact status
+
+        // Send push if they are offline (no sockets) OR if they are marked as away/inactive
+        if (!receiverSockets || receiverSockets.size === 0 || receiverStatus === 'away' || receiverStatus === 'inactive') {
+            await sendPushNotification(receiver_id, {
+                title: title,
+                body: body || 'You have a new notification',
+                url: url || '/'
+            });
+        } else {
+            // 🔥 NEW: User is ONLINE. Send in-app notification to all their active tabs
             for (const socketId of receiverSockets) {
                 io.to(socketId).emit('in_app_notification', {
                     title: title,
@@ -549,8 +552,6 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
                     url: url || '/'
                 });
             }
-        } else {
-             console.log(`[TEST FAILED] Cannot send toast. User ${receiver_id} has NO active sockets registered on the server!`);
         }
 
         res.status(200).json({ success: true, message: "Notification processed." });
