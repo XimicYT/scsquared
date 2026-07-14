@@ -47,7 +47,7 @@ webpush.setVapidDetails(
     process.env.VAPID_PRIVATE_KEY
 );
 
-const profanityFilter = new Filter();
+const profanityFilter = new Filter({ placeHolder: '█' });
 // Helper function to send push notifications securely
 async function sendPushNotification(userId, payload) {
     try {
@@ -592,8 +592,8 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
     // 2. THE FILTER: Intercept and clean before DB or Socket execution
     // (Assumes 'profanityFilter' is instantiated at the top of your server.js)
     if (message_text) {
-        message_text = profanityFilter.clean(message_text);
-    }
+    message_text = profanityFilter.clean(message_text);
+}
 
     const attachmentUrl = req.file ? req.file.path : null;
     try {
