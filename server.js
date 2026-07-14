@@ -11,7 +11,7 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const rateLimit = require('express-rate-limit');
 const webpush = require('web-push');
-
+const Filter = require('bad-words');
 // 1. General API Rate Limiter
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
@@ -47,6 +47,7 @@ webpush.setVapidDetails(
     process.env.VAPID_PRIVATE_KEY
 );
 
+const profanityFilter = new Filter();
 // Helper function to send push notifications securely
 async function sendPushNotification(userId, payload) {
     try {
@@ -579,10 +580,20 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
     });
 }, async (req, res) => {
     const myId = req.user.id;
-    const { receiver_id, message_text } = req.body;
+    
+    // 1. FIXED: Changed message_text to 'let' so it can be overwritten
+    const { receiver_id } = req.body;
+    let { message_text } = req.body; 
+    
     if (!receiver_id) return res.status(400).json({ error: "Missing receiver." });
     if (!message_text && !req.file) return res.status(400).json({ error: "Content required." });
     if (message_text && message_text.length > 2000) return res.status(400).json({ error: "Message exceeds 2,000 characters." });
+
+    // 2. THE FILTER: Intercept and clean before DB or Socket execution
+    // (Assumes 'profanityFilter' is instantiated at the top of your server.js)
+    if (message_text) {
+        message_text = profanityFilter.clean(message_text);
+    }
 
     const attachmentUrl = req.file ? req.file.path : null;
     try {
@@ -594,11 +605,13 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
             return res.status(403).json({ error: "Message failed to send." });
         }
 
+        // 3. This now naturally saves the clean text
         const { data: newMessage, error } = await supabase.from('messages').insert([{ sender_id: myId, receiver_id, message_text: message_text || "", attachment_url: attachmentUrl, is_read: false }]).select().single();
         if (error) throw error;
 
-        // FIXED: Spread Set into Array for io.to()
         const receiverSockets = activeUsers.get(receiver_id);
+        
+        // 4. This now naturally broadcasts the clean text
         if (receiverSockets && receiverSockets.size > 0) io.to([...receiverSockets]).emit('receive_message', newMessage);
 
         res.status(201).json(newMessage);
