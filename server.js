@@ -1008,12 +1008,26 @@ app.post('/api/groups/:id/messages', messageLimiter, requireAuth, (req, res, nex
 
 // 1. Create a new poll
 app.post('/api/polls', requireAuth, async (req, res) => {
-    const { question, options } = req.body;
+    let { question, options } = req.body; // 👈 Changed to let so we can filter them
     const myId = req.user.id;
 
     // Basic validation
     if (!question || !Array.isArray(options) || options.length < 2) {
         return res.status(400).json({ error: "Invalid poll data. Need a question and at least 2 options." });
+    }
+
+    // 🚀 NEW: Apply the bad-words filter to polls!
+    try {
+        if (question && typeof question === 'string') {
+            question = filter.clean(question);
+        }
+        if (options) {
+            // Loop through each option in the array and clean it
+            options = options.map(opt => (typeof opt === 'string' ? filter.clean(opt) : opt));
+        }
+    } catch (err) {
+        // If bad-words crashes on emojis/symbols, ignore and keep original text
+        console.warn("bad-words skipped a symbol-only poll");
     }
 
     try {
