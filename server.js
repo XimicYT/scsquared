@@ -588,9 +588,14 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
     if (!message_text && !req.file) return res.status(400).json({ error: "Content required." });
     if (message_text && message_text.length > 2000) return res.status(400).json({ error: "Message exceeds 2,000 characters." });
 
-    // Apply the bad-words filter before saving
-    if (message_text) {
-        message_text = filter.clean(message_text);
+    // Apply the bad-words filter safely
+    if (message_text && typeof message_text === 'string') {
+        try {
+            message_text = filter.clean(message_text);
+        } catch (err) {
+            // If bad-words crashes on emojis/symbols, just ignore and keep original text
+            console.warn("bad-words skipped a symbol-only message");
+        }
     }
 
     const attachmentUrl = req.file ? req.file.path : null;
@@ -971,9 +976,14 @@ app.post('/api/groups/:id/messages', messageLimiter, requireAuth, (req, res, nex
     if (!message_text && !req.file) return res.status(400).json({ error: "Message content or an image is required." });
     if (message_text && message_text.length > 2000) return res.status(400).json({ error: "Message exceeds 2,000 character limit." });
 
-    // Apply the bad-words filter before saving
-    if (message_text) {
-        message_text = filter.clean(message_text);
+    // Apply the bad-words filter safely
+    if (message_text && typeof message_text === 'string') {
+        try {
+            message_text = filter.clean(message_text);
+        } catch (err) {
+            // If bad-words crashes on emojis/symbols, just ignore and keep original text
+            console.warn("bad-words skipped a symbol-only message");
+        }
     }
 
     const attachmentUrl = req.file ? req.file.path : null;
