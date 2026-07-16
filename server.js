@@ -101,7 +101,11 @@ const upload = multer({
         }
     }
 });
-
+// Lightweight memory storage for Supabase Avatar uploads
+const uploadMemory = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 2 * 1024 * 1024 } // 2MB limit (our canvas crop is ~35KB!)
+});
 const app = express();
 app.set('trust proxy', 1);
 
@@ -360,15 +364,64 @@ const requireAuth = (req, res, next) => {
     }
 };
 
-app.put('/api/users/profile', requireAuth, async (req, res) => {
+app.put('/api/users/profile', requireAuth, uploadMemory.single('pfp'), async (req, res) => {
     const userId = req.user.id;
     let { bio, birth_month, birth_day, custom_color, timezone } = req.body;
-    bio = sanitizeInput(bio);
+    let avatar_url = null;
+
     try {
-        const { data, error } = await supabase.from('users').update({ bio, birth_month, birth_day, custom_color, timezone }).eq('id', userId).select('bio, birth_month, birth_day, custom_color, timezone').single();
+        // If you had a sanitizeInput function here, keep it applied to bio!
+        if (typeof sanitizeInput === 'function') {
+            bio = sanitizeInput(bio);
+        }
+
+        // 1. If a profile picture was uploaded, save it to Supabase Storage FIRST
+        if (req.file) {
+            const fileExt = req.file.originalname.split('.').pop() || 'jpg';
+            const fileName = `${userId}_${Date.now()}.${fileExt}`;
+
+            const { data: uploadData, error: uploadError } = await supabase.storage
+                .from('avatars')
+                .upload(fileName, req.file.buffer, {
+                    contentType: req.file.mimetype,
+                    upsert: true // Overwrite if they upload a new one later
+                });
+
+            if (uploadError) throw uploadError;
+
+            // Get the permanent public URL for the newly uploaded image
+            const { data: publicUrlData } = supabase.storage
+                .from('avatars')
+                .getPublicUrl(fileName);
+
+            avatar_url = publicUrlData.publicUrl;
+        }
+
+        // 2. Build the database update object
+        const updateData = { bio, birth_month, birth_day, custom_color, timezone };
+        // Only update avatar_url if they actually uploaded one
+        if (avatar_url) {
+            updateData.avatar_url = avatar_url;
+        }
+
+        // 3. Save everything to the database at the exact same time
+        const { data, error } = await supabase
+            .from('users')
+            .update(updateData)
+            .eq('id', userId)
+            .select('bio, birth_month, birth_day, custom_color, timezone, avatar_url')
+            .single();
+
         if (error) throw error;
-        res.status(200).json({ message: 'Profile updated successfully', profile: data });
+        
+        res.status(200).json({ 
+            message: 'Profile updated successfully', 
+            profile: data, 
+            avatar_url: data.avatar_url 
+        });
+
     } catch (err) {
+        console.error("Profile Setup Error:", err);
         res.status(500).json({ error: 'Failed to update profile.' });
     }
 });
