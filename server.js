@@ -329,7 +329,19 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
 
         const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET, { expiresIn: '24h' });
         res.cookie('sc_token', token, { httpOnly: true, secure: true, sameSite: 'None', maxAge: 24 * 60 * 60 * 1000 });
-        res.status(200).json({ message: 'Login successful', user: { id: user.id, username: user.username, chat_id: user.chat_id, first_name: user.first_name, bio: user.bio } });
+
+        // 🚀 FIX: Added avatar_url: user.avatar_url to the returned user object
+        res.status(200).json({
+            message: 'Login successful',
+            user: {
+                id: user.id,
+                username: user.username,
+                chat_id: user.chat_id,
+                first_name: user.first_name,
+                bio: user.bio,
+                avatar_url: user.avatar_url
+            }
+        });
     } catch (err) {
         res.status(401).json({ error: err.message });
     }
@@ -413,11 +425,11 @@ app.put('/api/users/profile', requireAuth, uploadMemory.single('pfp'), async (re
             .single();
 
         if (error) throw error;
-        
-        res.status(200).json({ 
-            message: 'Profile updated successfully', 
-            profile: data, 
-            avatar_url: data.avatar_url 
+
+        res.status(200).json({
+            message: 'Profile updated successfully',
+            profile: data,
+            avatar_url: data.avatar_url
         });
 
     } catch (err) {
@@ -459,7 +471,8 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
     try {
         const { data: contacts, error } = await supabase
             .from('contacts')
-            .select(`is_favorite, is_blocked, users!contacts_contact_user_id_fkey(id, username, chat_id, bio)`)
+            // 🚀 FIX: Added avatar_url to the list of fields to fetch from the users table
+            .select(`is_favorite, is_blocked, users!contacts_contact_user_id_fkey(id, username, chat_id, bio, avatar_url)`)
             .eq('user_id', myId);
 
         if (error) throw error;
@@ -920,9 +933,11 @@ app.get('/api/groups/:id/members', requireAuth, async (req, res) => {
             return res.status(403).json({ error: "Access denied. You are not an active member of this room." });
         }
 
+        // Inside app.get('/api/groups/:id/members', ...)
         const { data: members, error } = await supabase
             .from('group_members')
-            .select(`user_id, status, joined_at, users (id, username, chat_id)`)
+            // 🚀 FIX: Added avatar_url here for group chat members
+            .select(`user_id, status, joined_at, users (id, username, chat_id, avatar_url)`)
             .eq('group_id', groupId);
 
         if (error) throw error;
