@@ -279,7 +279,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
         return res.status(400).json({ error: 'First name must be between 1 and 50 characters.' });
     }
     if (!isValidUsername(username)) {
-        return res.status(400).json({ error: 'Username must be 3-20 characters long.' });
+        return res.status(400).json({ error: 'Username must be 3-20 characters long and contain only letters, numbers, underscores, or hyphens.' });
     }
     if (!isValidEmail(email)) {
         return res.status(400).json({ error: 'Please present a valid email address.' });
