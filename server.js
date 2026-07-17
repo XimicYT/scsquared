@@ -950,6 +950,7 @@ app.get('/api/groups/:id/members', requireAuth, async (req, res) => {
                 id: m.users.id,
                 username: m.users.username,
                 chat_id: m.users.chat_id,
+                avatar_url: m.users.avatar_url, // 🚀 ADD THIS LINE
                 status: m.status,
                 joined_at: m.joined_at
             }))
@@ -993,7 +994,6 @@ app.delete('/api/groups/:id/members/:memberId', requireAuth, async (req, res) =>
                 id: m.users.id,
                 username: m.users.username,
                 chat_id: m.users.chat_id,
-                avatar_url: m.users.avatar_url, // 🚀 ADD THIS LINE
                 status: m.status,
                 joined_at: m.joined_at
             }))
