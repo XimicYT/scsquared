@@ -987,7 +987,17 @@ app.delete('/api/groups/:id/members/:memberId', requireAuth, async (req, res) =>
         }
 
         io.to(`group_${groupId}`).emit('group_members_updated', groupId);
-        res.json({ success: true, message: "Member terminated and cleared from channel data structures." });
+        res.json({
+            creator_id: group ? group.created_by : null,
+            members: (members || []).filter(m => m.users !== null).map(m => ({
+                id: m.users.id,
+                username: m.users.username,
+                chat_id: m.users.chat_id,
+                avatar_url: m.users.avatar_url, // 🚀 ADD THIS LINE
+                status: m.status,
+                joined_at: m.joined_at
+            }))
+        });
     } catch (err) {
         res.status(500).json({ error: "System failure during member deletion routine." });
     }
