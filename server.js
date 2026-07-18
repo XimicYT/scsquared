@@ -569,6 +569,69 @@ app.patch('/api/contacts/favorite', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error updating favorites.' });
     }
 });
+// --- Get User Settings ---
+app.get('/api/users/settings', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+    try {
+        const { data, error } = await supabase
+            .from('user_settings')
+            .select('*')
+            .eq('user_id', myId)
+            .single();
+
+        if (error) {
+            // PGRST116 means "No rows returned". 
+            // This happens for legacy users who were created before we added the SQL trigger.
+            if (error.code === 'PGRST116') {
+                return res.status(200).json({ settings: {} }); // Return empty, frontend will use HTML defaults
+            }
+            throw error;
+        }
+
+        res.status(200).json({ settings: data });
+    } catch (err) {
+        console.error("Error fetching settings:", err);
+        res.status(500).json({ error: 'Server error fetching settings.' });
+    }
+});
+
+// --- Update User Settings ---
+app.put('/api/users/settings', requireAuth, express.json(), async (req, res) => {
+    const myId = req.user.id;
+    
+    // Security: Explicitly define allowed fields so attackers can't inject malicious columns
+    const allowedFields = [
+        'os_notifications', 'in_app_notifications', 'alert_while_away',
+        'draggable_apps', 'app_hover_audio', 'app_click_audio', 'auto_pin_apps',
+        'chat_sort_by', 'contact_sort_by', 'show_blocked_contacts',
+        'group_show_blocked_messages', 'group_show_blocked_members', 'group_show_self_members'
+    ];
+
+    const updatePayload = { updated_at: new Date() };
+
+    // Loop through allowed fields and only add them if they exist in the request body
+    allowedFields.forEach(field => {
+        if (req.body[field] !== undefined) {
+            updatePayload[field] = req.body[field];
+        }
+    });
+
+    try {
+        // Upsert ensures if a legacy user doesn't have a row, it creates one instead of failing.
+        const { data, error } = await supabase
+            .from('user_settings')
+            .upsert({ user_id: myId, ...updatePayload })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.status(200).json({ message: 'Settings updated successfully', settings: data });
+    } catch (err) {
+        console.error("Error updating settings:", err);
+        res.status(500).json({ error: 'Server error updating settings.' });
+    }
+});
 app.post('/api/notifications/subscribe', requireAuth, async (req, res) => {
     const myId = req.user.id;
     const { subscription } = req.body;
