@@ -686,7 +686,29 @@ app.post('/api/messages', messageLimiter, requireAuth, (req, res, next) => {
         res.status(500).json({ error: 'Failed to send message.' });
     }
 });
+// --- Get Current Logged-In User Profile ---
+app.get('/api/users/me', requireAuth, async (req, res) => {
+    try {
+        // req.user.id is securely provided by your requireAuth middleware
+        const myId = req.user.id;
 
+        const { data: user, error } = await supabase
+            .from('users')
+            // Fetching all the relevant fields your app uses based on your PUT route
+            .select('id, first_name, username, email, chat_id, bio, avatar_url, birth_month, birth_day, custom_color, timezone')
+            .eq('id', myId)
+            .single();
+
+        if (error || !user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        res.status(200).json({ user });
+    } catch (err) {
+        console.error("Error fetching current user profile:", err);
+        res.status(500).json({ error: 'Server error fetching user profile.' });
+    }
+});
 // ==========================================
 // 👥 GROUP CHATS API ENDPOINTS
 // ==========================================
