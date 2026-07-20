@@ -598,7 +598,7 @@ app.get('/api/users/settings', requireAuth, async (req, res) => {
 // --- Update User Settings ---
 app.put('/api/users/settings', requireAuth, express.json(), async (req, res) => {
     const myId = req.user.id;
-    
+
     // Security: Explicitly define allowed fields so attackers can't inject malicious columns
     const allowedFields = [
         'os_notifications', 'in_app_notifications', 'alert_while_away',
@@ -665,17 +665,57 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
 
     try {
         const receiverSockets = activeUsers.get(receiver_id);
-        const receiverStatus = userStatuses.get(receiver_id) || 'offline'; // Grab their exact status
+        const isOffline = !receiverSockets || receiverSockets.size === 0;
+        const receiverStatus = userStatuses.get(receiver_id) || 'offline';
 
-        // Send push if they are offline (no sockets) OR if they are marked as away/inactive
-        if (!receiverSockets || receiverSockets.size === 0 || receiverStatus === 'away' || receiverStatus === 'inactive') {
+        // 1. Fetch the user's settings from Supabase to check their Away preferences
+        // Note: Change 'users' to whatever your table name is (e.g., 'settings', 'profiles')
+        const { data: userSettings } = await supabase
+            .from('users')
+            .select('alert_while_away')
+            .eq('id', receiver_id)
+            .single();
+
+        // Default to 'in_app' and handle backwards compatibility for old boolean DB records
+        let awaySetting = 'in_app';
+        if (userSettings && userSettings.alert_while_away !== null) {
+            if (userSettings.alert_while_away === true) awaySetting = 'in_app';
+            else if (userSettings.alert_while_away === false) awaySetting = 'none';
+            else awaySetting = userSettings.alert_while_away; // 'os', 'in_app', or 'none'
+        }
+
+        // 2. Decide routing based on their exact status and settings
+        let sendPush = false;
+        let sendInApp = false;
+
+        if (isOffline) {
+            // They have no open tabs. They must get a push notification.
+            sendPush = true;
+        } else if (receiverStatus === 'away' || receiverStatus === 'inactive') {
+            // 🔥 THE FIX: They are away, so check the dropdown setting!
+            if (awaySetting === 'os') {
+                sendPush = true;
+            } else if (awaySetting === 'in_app') {
+                sendInApp = true;
+            } else if (awaySetting === 'none') {
+                console.log(`[NOTIF] User ${receiver_id} is away and has muted alerts.`);
+                // Do neither!
+            }
+        } else {
+            // User is online and active -> Send standard In-App socket
+            sendInApp = true;
+        }
+
+        // 3. Execute Actions
+        if (sendPush) {
             await sendPushNotification(receiver_id, {
                 title: title,
                 body: body || 'You have a new notification',
                 url: url || '/'
             });
-        } else {
-            // 🔥 NEW: User is ONLINE. Send in-app notification to all their active tabs
+        }
+
+        if (sendInApp && !isOffline) {
             for (const socketId of receiverSockets) {
                 io.to(socketId).emit('in_app_notification', {
                     title: title,
@@ -685,7 +725,7 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
             }
         }
 
-        res.status(200).json({ success: true, message: "Notification processed." });
+        res.status(200).json({ success: true, message: "Notification processed successfully." });
     } catch (err) {
         console.error("Error triggering notification:", err);
         res.status(500).json({ error: "Failed to trigger notification." });
