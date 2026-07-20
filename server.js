@@ -689,20 +689,25 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
         let sendInApp = false;
 
         if (isOffline) {
-            // They have no open tabs. They must get a push notification.
+            // Hardware level - No open tabs at all. 
             sendPush = true;
         } else if (receiverStatus === 'away' || receiverStatus === 'inactive') {
-            // 🔥 THE FIX: They are away, so check the dropdown setting!
-            if (awaySetting === 'os') {
-                sendPush = true;
-            } else if (awaySetting === 'in_app') {
-                sendInApp = true;
-            } else if (awaySetting === 'none') {
-                console.log(`[NOTIF] User ${receiver_id} is away and has muted alerts.`);
-                // Do neither!
+            // They are connected to sockets, but the app is minimized or they are AFK
+            switch (awaySetting) {
+                case 'os':
+                    sendPush = true; // Let sw.js catch this in the background!
+                    break;
+                case 'in_app':
+                    sendInApp = true;
+                    break;
+                case 'none':
+                    console.log(`[NOTIF] Silenced: User ${receiver_id} is away (Mode: None).`);
+                    break;
+                default:
+                    sendInApp = true; // Safe fallback
             }
         } else {
-            // User is online and active -> Send standard In-App socket
+            // User is fully online and actively looking at the screen
             sendInApp = true;
         }
 
