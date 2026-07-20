@@ -666,52 +666,21 @@ app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
     try {
         const receiverSockets = activeUsers.get(receiver_id);
         const isOffline = !receiverSockets || receiverSockets.size === 0;
-        const receiverStatus = userStatuses.get(receiver_id) || 'offline';
 
-        // 1. Fetch the user's settings from Supabase to check their Away preferences
-        // Note: Change 'users' to whatever your table name is (e.g., 'settings', 'profiles')
-        const { data: userSettings } = await supabase
-            .from('users')
-            .select('alert_while_away')
-            .eq('id', receiver_id)
-            .single();
-
-        // Default to 'in_app' and handle backwards compatibility for old boolean DB records
-        let awaySetting = 'in_app';
-        if (userSettings && userSettings.alert_while_away !== null) {
-            if (userSettings.alert_while_away === true) awaySetting = 'in_app';
-            else if (userSettings.alert_while_away === false) awaySetting = 'none';
-            else awaySetting = userSettings.alert_while_away; // 'os', 'in_app', or 'none'
-        }
-
-        // 2. Decide routing based on their exact status and settings
+        // 1. Decide routing based purely on socket connection (Ultimate Simplification)
         let sendPush = false;
         let sendInApp = false;
 
         if (isOffline) {
-            // Hardware level - No open tabs at all. 
+            // Hardware level - No open tabs connected to Socket.io. Send an OS Push.
             sendPush = true;
-        } else if (receiverStatus === 'away' || receiverStatus === 'inactive') {
-            // They are connected to sockets, but the app is minimized or they are AFK
-            switch (awaySetting) {
-                case 'os':
-                    sendPush = true; // Let sw.js catch this in the background!
-                    break;
-                case 'in_app':
-                    sendInApp = true;
-                    break;
-                case 'none':
-                    console.log(`[NOTIF] Silenced: User ${receiver_id} is away (Mode: None).`);
-                    break;
-                default:
-                    sendInApp = true; // Safe fallback
-            }
         } else {
-            // User is fully online and actively looking at the screen
+            // They have an open tab (active or minimized). Send In-App. 
+            // (If minimized, the browser will hold the socket event or sw.js will manage it based on your setup)
             sendInApp = true;
         }
 
-        // 3. Execute Actions
+        // 2. Execute Actions
         if (sendPush) {
             await sendPushNotification(receiver_id, {
                 title: title,
