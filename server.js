@@ -524,7 +524,41 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error fetching contacts.' });
     }
 });
+// ==========================================
+// ⚠️ WIPE ENTIRE CONTACT NETWORK
+// ==========================================
+app.delete('/api/contacts/all', requireAuth, async (req, res) => {
+    const myId = req.user.id;
 
+    try {
+        // 1. Fetch all current contacts BEFORE deleting, so we know who to notify via Sockets
+        const { data: contactsToNotify, error: fetchErr } = await supabase
+            .from('contacts')
+            .select('contact_user_id')
+            .eq('user_id', myId);
+
+        if (fetchErr) throw fetchErr;
+
+        // 2. Nuke the database: Remove your list, and remove you from their lists
+        await supabase.from('contacts').delete().eq('user_id', myId);
+        await supabase.from('contacts').delete().eq('contact_user_id', myId);
+
+        // 3. Real-time Fanout: Make you vanish from their screens instantly
+        if (contactsToNotify && contactsToNotify.length > 0) {
+            contactsToNotify.forEach(contact => {
+                const friendSockets = activeUsers.get(contact.contact_user_id);
+                if (friendSockets && friendSockets.size > 0) {
+                    io.to([...friendSockets]).emit('contacts_updated');
+                }
+            });
+        }
+
+        res.status(200).json({ message: 'Entire contact network wiped successfully.' });
+    } catch (err) {
+        console.error("[WIPE NETWORK ERROR]:", err);
+        res.status(500).json({ error: 'Server error while wiping contact network.' });
+    }
+});
 app.delete('/api/contacts/:contact_id', requireAuth, async (req, res) => {
     const myId = req.user.id;
     const contactId = req.params.contact_id;
