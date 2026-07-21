@@ -471,8 +471,8 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
     try {
         const { data: contacts, error } = await supabase
             .from('contacts')
-            // 🚀 FIX: Added avatar_url to the list of fields to fetch from the users table
-            .select(`is_favorite, is_blocked, users!contacts_contact_user_id_fkey(id, username, chat_id, bio, avatar_url)`)
+            // 🚀 FIX 1: Added 'created_at' to the fields pulled from the contacts table
+            .select(`created_at, is_favorite, is_blocked, users!contacts_contact_user_id_fkey(id, username, chat_id, bio, avatar_url)`)
             .eq('user_id', myId);
 
         if (error) throw error;
@@ -481,13 +481,14 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
         const formattedContacts = await Promise.all(contacts.map(async (c) => {
             const isOnline = activeUsers.has(c.users.id);
 
-            // 🔥 ADD THIS: Grab their exact status if they are online, otherwise fallback to offline
+            // Grab their exact status if they are online, otherwise fallback to offline
             const exactStatus = isOnline ? (userStatuses.get(c.users.id) || 'online') : 'offline';
 
             // 1. Fetch the most recent message between you and this contact
             const { data: lastMsgData } = await supabase
                 .from('messages')
-                .select('message_text, attachment_url, sender_id')
+                // 🚀 FIX 2: Added 'created_at' to the fields pulled from the messages table
+                .select('message_text, attachment_url, sender_id, created_at')
                 .or(`and(sender_id.eq.${myId},receiver_id.eq.${c.users.id}),and(sender_id.eq.${c.users.id},receiver_id.eq.${myId})`)
                 .order('created_at', { ascending: false })
                 .limit(1)
@@ -496,10 +497,12 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
             // 2. Format the preview text (handle image-only messages safely)
             let previewText = "";
             let senderId = null;
+            let lastMessageTime = null;
 
             if (lastMsgData) {
                 previewText = lastMsgData.message_text || (lastMsgData.attachment_url ? '📸 Image' : '');
                 senderId = lastMsgData.sender_id;
+                lastMessageTime = lastMsgData.created_at; // Capture the timestamp
             }
 
             // 3. Return the fully assembled contact object
@@ -507,9 +510,11 @@ app.get('/api/contacts', requireAuth, async (req, res) => {
                 ...c.users,
                 is_favorite: c.is_favorite,
                 is_blocked: c.is_blocked,
+                created_at: c.created_at,              // 🚀 FIX 3: Bind contact creation time
+                last_message_at: lastMessageTime,      // 🚀 FIX 4: Bind last message time
                 last_message: previewText,
                 last_message_sender_id: senderId,
-                current_status: exactStatus  // 🔥 CHANGE THIS LINE to use exactStatus
+                current_status: exactStatus
             };
         }));
 
