@@ -826,6 +826,56 @@ app.get('/api/users/me', requireAuth, async (req, res) => {
     }
 });
 // ==========================================
+// ⚠️ DANGER ZONE: ACCOUNT PURGE
+// ==========================================
+app.delete('/api/users/me', requireAuth, async (req, res) => {
+    const myId = req.user.id;
+
+    try {
+        // 1. Explicitly nuke relational & sensitive data 
+        // (This acts as a safety net in case Supabase 'ON DELETE CASCADE' isn't set up perfectly on every table)
+
+        // Wipe Contacts (both directions)
+        await supabase.from('contacts').delete().eq('user_id', myId);
+        await supabase.from('contacts').delete().eq('contact_user_id', myId);
+
+        // Wipe Direct Messages (where they are sender or receiver)
+        await supabase.from('messages').delete().eq('sender_id', myId);
+        await supabase.from('messages').delete().eq('receiver_id', myId);
+
+        // Remove them from all groups
+        await supabase.from('group_members').delete().eq('user_id', myId);
+
+        // Wipe Push Notification Subscriptions
+        await supabase.from('push_subscriptions').delete().eq('user_id', myId);
+
+        // 2. Destroy the core user record
+        // (If user_settings is linked via a foreign key, it should delete automatically here)
+        const { error: userDeleteErr } = await supabase.from('users').delete().eq('id', myId);
+
+        if (userDeleteErr) throw userDeleteErr;
+
+        // 3. Ghost them from the live server
+        // Find their active sockets and forcefully disconnect them so they instantly appear offline to everyone
+        const mySockets = activeUsers.get(myId);
+        if (mySockets && mySockets.size > 0) {
+            mySockets.forEach(socketId => {
+                const socket = io.sockets.sockets.get(socketId);
+                if (socket) socket.disconnect(true); // true = force close
+            });
+            activeUsers.delete(myId); // Remove from the live tracking Map
+        }
+
+        // Emit a broadcast to update contacts/groups for everyone else (Optional, but makes it feel instant for others)
+        io.emit('contacts_updated');
+
+        res.status(200).json({ message: 'Account successfully purged.' });
+    } catch (err) {
+        console.error("[PURGE ACCOUNT ERROR]:", err);
+        res.status(500).json({ error: 'Server error while destroying account.' });
+    }
+});
+// ==========================================
 // 👥 GROUP CHATS API ENDPOINTS
 // ==========================================
 
