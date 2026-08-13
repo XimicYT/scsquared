@@ -684,27 +684,68 @@ app.put('/api/users/settings', requireAuth, express.json(), async (req, res) => 
         res.status(500).json({ error: 'Server error updating settings.' });
     }
 });
-app.post('/api/notifications/subscribe', requireAuth, async (req, res) => {
-    const myId = req.user.id;
-    const { subscription } = req.body;
+// Generic endpoint to trigger a notification from the frontend
+app.post('/api/notifications/trigger', requireAuth, async (req, res) => {
+    const { receiver_id, title, body, url } = req.body;
 
-    if (!subscription || !subscription.endpoint) {
-        return res.status(400).json({ error: "Invalid subscription payload." });
+    if (!receiver_id || !title) {
+        return res.status(400).json({ error: "Missing required notification fields." });
     }
 
     try {
-        // Upsert the subscription (handles if the same device sends it twice)
-        const { error } = await supabase.from('push_subscriptions').upsert({
-            user_id: myId,
-            endpoint: subscription.endpoint,
-            keys_auth: subscription.keys.auth,
-            keys_p256dh: subscription.keys.p256dh
-        }, { onConflict: 'endpoint' });
+        const receiverSockets = activeUsers.get(receiver_id);
+        const isOffline = !receiverSockets || receiverSockets.size === 0;
 
-        if (error) throw error;
-        res.status(200).json({ success: true, message: "Device registered for push." });
+        // 1. Decide routing based purely on socket connection (Ultimate Simplification)
+        let sendPush = false;
+        let sendInApp = false;
+
+        if (isOffline) {
+            // Hardware level - No open tabs connected to Socket.io. Send an OS Push.
+            sendPush = true;
+        } else {
+            // They have an open tab (active or minimized). Send In-App. 
+            sendInApp = true;
+        }
+
+        // 2. Execute Actions
+        if (sendPush) {
+            await sendPushNotification(receiver_id, {
+                title: title,
+                body: body || 'You have a new notification',
+                url: url || '/'
+            });
+        }
+
+        if (sendInApp && !isOffline) {
+            // 🚀 SC² FIX: Deduce the target room from the URL payload
+            let targetRoom = null;
+            if (url && url.includes('groupchats') && url.includes('openId=')) {
+                const match = url.match(/openId=([^&]+)/);
+                if (match) targetRoom = `group_${match[1]}`;
+            }
+
+            for (const socketId of receiverSockets) {
+                const targetSocket = io.sockets.sockets.get(socketId);
+                
+                // 🛡️ SUPPRESSION LOGIC: If the user's socket is currently inside the room
+                // where this notification originated, DO NOT show the popup!
+                if (targetRoom && targetSocket && targetSocket.rooms.has(targetRoom)) {
+                    continue; // Skip this socket, let the live chat feed handle the UI
+                }
+
+                io.to(socketId).emit('in_app_notification', {
+                    title: title,
+                    body: body || 'You have a new message',
+                    url: url || '/'
+                });
+            }
+        }
+
+        res.status(200).json({ success: true, message: "Notification processed successfully." });
     } catch (err) {
-        res.status(500).json({ error: "Failed to save push subscription." });
+        console.error("Error triggering notification:", err);
+        res.status(500).json({ error: "Failed to trigger notification." });
     }
 });
 // Generic endpoint to trigger a notification from the frontend
