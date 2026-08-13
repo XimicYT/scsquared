@@ -185,7 +185,20 @@ io.on('connection', (socket) => {
             });
         }
     });
-
+    // 🚀 SC² FIX: Allow users to actually join the Group Chat room!
+    socket.on('join_group_room', (groupId) => {
+        // First, leave all previous group rooms so we don't get cross-chatter
+        socket.rooms.forEach(room => {
+            if (room.startsWith('group_')) {
+                socket.leave(room);
+            }
+        });
+        
+        // Join the new active group room
+        const roomName = `group_${groupId}`;
+        socket.join(roomName);
+        console.log(`[Socket] User ${socket.userId} joined ${roomName}`);
+    });
     socket.on('disconnect', () => {
         const userId = socket.userId;
         if (userId && activeUsers.has(userId)) {
@@ -1237,19 +1250,14 @@ app.post('/api/groups/:id/messages', messageLimiter, requireAuth, (req, res, nex
 }, async (req, res) => {
     const groupId = req.params.id;
     const myId = req.user.id;
-    let { message_text } = req.body; // Changed to let so we can filter it
+    let { message_text } = req.body; 
 
     if (!message_text && !req.file) return res.status(400).json({ error: "Message content or an image is required." });
     if (message_text && message_text.length > 2000) return res.status(400).json({ error: "Message exceeds 2,000 character limit." });
 
-    // Apply the bad-words filter safely
     if (message_text && typeof message_text === 'string') {
-        try {
-            message_text = filter.clean(message_text);
-        } catch (err) {
-            // If bad-words crashes on emojis/symbols, just ignore and keep original text
-            console.warn("bad-words skipped a symbol-only message");
-        }
+        try { message_text = filter.clean(message_text); } 
+        catch (err) { console.warn("bad-words skipped a symbol-only message"); }
     }
 
     const attachmentUrl = req.file ? req.file.path : null;
@@ -1259,7 +1267,12 @@ app.post('/api/groups/:id/messages', messageLimiter, requireAuth, (req, res, nex
             return res.status(403).json({ error: "You are not an active member of this group." });
         }
 
-        const { data: newMessage, error } = await supabase.from('group_messages').insert([{ group_id: groupId, sender_id: myId, message_text: message_text || "", attachment_url: attachmentUrl }]).select(`id, message_text, attachment_url, created_at, sender_id, users(username)`).single();
+        const { data: newMessage, error } = await supabase.from('group_messages')
+            .insert([{ group_id: groupId, sender_id: myId, message_text: message_text || "", attachment_url: attachmentUrl }])
+            // 🚀 CRITICAL FIX: We added 'group_id' to the select string so the socket payload has it!
+            .select(`id, group_id, message_text, attachment_url, created_at, sender_id, users(username)`)
+            .single();
+            
         if (error) throw error;
 
         io.to(`group_${groupId}`).emit('receive_group_message', newMessage);
