@@ -660,7 +660,35 @@ app.get('/api/users/settings', requireAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error fetching settings.' });
     }
 });
+// 🚀 SC² FIX: Safe Profile Discovery Lookup
+app.get('/api/users/lookup/:chatId', async (req, res) => {
+    try {
+        const { chatId } = req.params;
+        
+        // Query Supabase for the public profile
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('id, username, chat_id, avatar_url')
+            .eq('chat_id', chatId)
+            .single();
 
+        if (error || !user) {
+            return res.status(404).json({ error: "No user found with that ID." });
+        }
+
+        // Attach live socket presence!
+        const isOnline = activeUsers.has(user.id);
+        const exactStatus = isOnline ? (userStatuses.get(user.id) || 'online') : 'offline';
+
+        res.json({
+            ...user,
+            current_status: exactStatus
+        });
+
+    } catch (err) {
+        res.status(500).json({ error: "Lookup failed." });
+    }
+});
 // --- Update User Settings ---
 app.put('/api/users/settings', requireAuth, express.json(), async (req, res) => {
     const myId = req.user.id;
