@@ -173,16 +173,30 @@ io.on('connection', (socket) => {
             io.emit('user_status_update', { userId: userId, status: data.status });
         }
     });
-    // MISSING FEATURE ADDED: Relays typing events to the specific user's active tabs
+    // 🚀 SC² FIX: Smart Typing Router (Handles 1-on-1 AND Group Chats)
     socket.on('typing', (data) => {
-        const receiverSockets = activeUsers.get(data.receiver_id);
-        if (receiverSockets && receiverSockets.size > 0) {
-            io.to([...receiverSockets]).emit('typing', {
-                sender_id: socket.userId,
+        // Scenario A: It's a Group Chat Typing Event
+        if (data.groupId) {
+            // Emit to everyone in the room EXCEPT the sender
+            socket.to(`group_${data.groupId}`).emit('typing', {
+                groupId: data.groupId,
                 username: data.username,
-                isTyping: data.isTyping,
-                receiver_id: data.receiver_id
+                isTyping: data.isTyping
             });
+            return; // Stop execution here
+        }
+
+        // Scenario B: It's a 1-on-1 Direct Message Typing Event
+        if (data.receiver_id) {
+            const receiverSockets = activeUsers.get(data.receiver_id);
+            if (receiverSockets && receiverSockets.size > 0) {
+                io.to([...receiverSockets]).emit('typing', {
+                    sender_id: socket.userId,
+                    username: data.username,
+                    isTyping: data.isTyping,
+                    receiver_id: data.receiver_id
+                });
+            }
         }
     });
     // 🚀 SC² FIX: Allow users to actually join the Group Chat room!
@@ -1188,14 +1202,21 @@ app.get('/api/groups/:id/members', requireAuth, async (req, res) => {
 
         res.json({
             creator_id: group ? group.created_by : null,
-            members: (members || []).filter(m => m.users !== null).map(m => ({
-                id: m.users.id,
-                username: m.users.username,
-                chat_id: m.users.chat_id,
-                avatar_url: m.users.avatar_url, // 🚀 ADD THIS LINE
-                status: m.status,
-                joined_at: m.joined_at
-            }))
+            members: (members || []).filter(m => m.users !== null).map(m => {
+                // 🚀 SC² FIX: Map live socket status dynamically
+                const isOnline = activeUsers.has(m.users.id);
+                const exactStatus = isOnline ? (userStatuses.get(m.users.id) || 'online') : 'offline';
+
+                return {
+                    id: m.users.id,
+                    username: m.users.username,
+                    chat_id: m.users.chat_id,
+                    avatar_url: m.users.avatar_url,
+                    status: m.status, // Keep this for "joined/invited" logic
+                    current_status: exactStatus, // 🚀 NEW FIELD: The actual live online status!
+                    joined_at: m.joined_at
+                };
+            })
         });
     } catch (err) {
         res.status(500).json({ error: "Failed to retrieve member log files." });
